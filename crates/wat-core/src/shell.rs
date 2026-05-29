@@ -1,19 +1,25 @@
-use crate::env::Env;
+use crate::context::Context;
 use crate::eval::eval;
 use crate::parser::parse;
 
 pub struct Shell {
-    pub env: Env,
+    pub ctx: Context,
     pub exit_requested: bool,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        Self { env: Env::new(), exit_requested: false }
+        Self { ctx: Context::new(), exit_requested: false }
+    }
+
+    /// Construct a shell backed by MemoryVfs, regardless of compile features.
+    /// Used in tests and the WASM target.
+    pub fn with_memory_vfs() -> Self {
+        Self { ctx: Context::with_memory_vfs(), exit_requested: false }
     }
 
     pub fn prompt(&self) -> String {
-        format!("5cotts@zo {} % ", self.env.prompt_cwd())
+        format!("5cotts@zo {} % ", self.ctx.env.prompt_cwd())
     }
 
     pub fn feed(&mut self, input: &str) -> String {
@@ -22,22 +28,21 @@ impl Shell {
             return String::new();
         }
 
-        // Check for exit before parsing (handles `exit`, `exit N`)
         if input == "exit" {
-            self.env.last_exit_code = 0;
+            self.ctx.env.last_exit_code = 0;
             self.exit_requested = true;
             return String::new();
         }
         if let Some(rest) = input.strip_prefix("exit ") {
             let code = rest.trim().parse::<i32>().unwrap_or(0);
-            self.env.last_exit_code = code;
+            self.ctx.env.last_exit_code = code;
             self.exit_requested = true;
             return String::new();
         }
 
         match parse(input) {
             Ok(list) => {
-                let (_, output) = eval(&list, &mut self.env);
+                let (_, output) = eval(&list, &mut self.ctx);
                 output
             }
             Err(e) => format!("wat: {}\n", e),
@@ -45,7 +50,7 @@ impl Shell {
     }
 
     pub fn last_exit_code(&self) -> i32 {
-        self.env.last_exit_code
+        self.ctx.env.last_exit_code
     }
 }
 
