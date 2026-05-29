@@ -61,9 +61,6 @@ impl Node {
     fn is_dir(&self) -> bool {
         matches!(self, Node::Dir { .. })
     }
-    fn is_file(&self) -> bool {
-        matches!(self, Node::File { .. })
-    }
 }
 
 /// An in-memory filesystem tree. Used as the WASM VFS and in tests.
@@ -278,6 +275,13 @@ pub struct NativeVfs;
 impl NativeVfs {
     pub fn new() -> Self {
         NativeVfs
+    }
+}
+
+#[cfg(feature = "native-fs")]
+impl Default for NativeVfs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -2,6 +2,8 @@
 
 A POSIX-flavored shell written in Rust that runs natively and compiles to WebAssembly for the browser.
 
+**Live site:** https://zo.pub/5cotts/wat
+
 ## First-time setup
 
 All tooling is scoped to this directory — nothing is installed globally.

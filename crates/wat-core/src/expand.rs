@@ -8,11 +8,9 @@ pub fn expand_word(word: &str, env: &Env) -> String {
     let mut i = 0;
 
     // Leading ~ expands to $HOME (only when it's the whole token or followed by /)
-    if !chars.is_empty() && chars[0] == '~' {
-        if chars.len() == 1 || chars[1] == '/' {
-            out.push_str(env.home());
-            i = 1;
-        }
+    if !chars.is_empty() && chars[0] == '~' && (chars.len() == 1 || chars[1] == '/') {
+        out.push_str(env.home());
+        i = 1;
     }
 
     while i < chars.len() {

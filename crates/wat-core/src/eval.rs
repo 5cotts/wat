@@ -44,17 +44,15 @@ fn eval_pipeline(pipeline: &Pipeline, ctx: &mut Context, initial_stdin: &[u8]) -
     let cmds = &pipeline.0;
     let mut stdin_data: Vec<u8> = initial_stdin.to_vec();
     let mut all_stderr: Vec<u8> = Vec::new();
-    let mut last_code = 0;
 
     for (idx, cmd) in cmds.iter().enumerate() {
         let is_last = idx + 1 == cmds.len();
         let (code, stdout, stderr) = run_command(cmd, ctx, &stdin_data);
         all_stderr.extend_from_slice(&stderr);
-        last_code = code;
         ctx.env.last_exit_code = code;
 
         if is_last {
-            return (last_code, stdout, all_stderr);
+            return (code, stdout, all_stderr);
         }
         stdin_data = stdout;
     }

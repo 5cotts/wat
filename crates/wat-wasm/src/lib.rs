@@ -11,6 +11,16 @@ impl Shell {
     pub fn new() -> Shell {
         Shell { inner: wat_core::Shell::with_memory_vfs() }
     }
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl Shell {
 
     pub fn prompt(&self) -> String {
         self.inner.prompt()

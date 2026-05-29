@@ -91,7 +91,7 @@ fn match_glob_chars(pat: &[char], name: &[char]) -> bool {
 }
 
 /// Returns (char_matched, remaining_pattern_after_]).
-fn match_char_class<'a>(pat: &'a [char], c: Option<char>) -> (bool, &'a [char]) {
+fn match_char_class(pat: &[char], c: Option<char>) -> (bool, &[char]) {
     let c = match c {
         Some(c) => c,
         None => return (false, pat),
