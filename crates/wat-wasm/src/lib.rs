@@ -9,9 +9,7 @@ pub struct Shell {
 impl Shell {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Shell {
-        Shell {
-            inner: wat_core::Shell::new(),
-        }
+        Shell { inner: wat_core::Shell::with_memory_vfs() }
     }
 
     pub fn prompt(&self) -> String {
@@ -22,11 +20,11 @@ impl Shell {
         self.inner.feed(input)
     }
 
-    pub fn complete(&self, _input: &str, _cursor: usize) -> Vec<String> {
-        vec![]
+    pub fn complete(&self, input: &str, cursor: usize) -> Vec<String> {
+        self.inner.complete(input, cursor)
     }
 
-    pub fn history_at(&self, _index: usize) -> Option<String> {
-        None
+    pub fn history_at(&self, index: usize) -> Option<String> {
+        self.inner.history_at(index)
     }
 }

@@ -6,6 +6,7 @@ use crate::vfs::FileType;
 pub mod resolve;
 
 /// Run a builtin. Returns `Some(exit_code)` if known, `None` if not a builtin.
+/// `history` is `None` when called from a context that doesn't track it (e.g., pipeline stage).
 pub fn run_builtin<'a>(
     name: &str,
     args: &[String],
@@ -41,8 +42,16 @@ pub fn run_builtin<'a>(
         "uniq" => Some(uniq_builtin(io)),
         "tr" => Some(tr(args, io)),
         "cut" => Some(cut(args, io)),
+        "history" => Some(history_builtin(ctx, io)),
         _ => None,
     }
+}
+
+fn history_builtin(ctx: &Context, io: &mut ShellIo) -> i32 {
+    for (i, cmd) in ctx.history.iter().enumerate() {
+        io.write_out(&format!("{:4}  {}\n", i + 1, cmd));
+    }
+    0
 }
 
 // ── Non-file builtins ──────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ use crate::builtins::resolve::resolve_path;
 use crate::builtins::run_builtin;
 use crate::context::Context;
 use crate::expand::expand_word;
+use crate::glob::glob_expand;
 use crate::io::ShellIo;
 
 /// Evaluate a parsed command list. Returns `(exit_code, combined_output)`.
@@ -64,7 +65,11 @@ fn eval_pipeline(pipeline: &Pipeline, ctx: &mut Context, initial_stdin: &[u8]) -
 /// Run a single command, handling redirects. Returns `(exit_code, stdout, stderr)`.
 fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
     let name = expand_word(&cmd.name, &ctx.env);
-    let args: Vec<String> = cmd.args.iter().map(|a| expand_word(a, &ctx.env)).collect();
+    // Expand variables then glob-expand each argument
+    let args: Vec<String> = cmd.args.iter().flat_map(|a| {
+        let expanded = expand_word(a, &ctx.env);
+        glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
+    }).collect();
 
     // Determine effective stdin (may be overridden by `< file`)
     let stdin_bytes: Vec<u8> = cmd

@@ -1,3 +1,4 @@
+use crate::complete::complete;
 use crate::context::Context;
 use crate::eval::eval;
 use crate::parser::parse;
@@ -12,8 +13,6 @@ impl Shell {
         Self { ctx: Context::new(), exit_requested: false }
     }
 
-    /// Construct a shell backed by MemoryVfs, regardless of compile features.
-    /// Used in tests and the WASM target.
     pub fn with_memory_vfs() -> Self {
         Self { ctx: Context::with_memory_vfs(), exit_requested: false }
     }
@@ -40,6 +39,8 @@ impl Shell {
             return String::new();
         }
 
+        self.ctx.history.push(input);
+
         match parse(input) {
             Ok(list) => {
                 let (_, output) = eval(&list, &mut self.ctx);
@@ -47,6 +48,14 @@ impl Shell {
             }
             Err(e) => format!("wat: {}\n", e),
         }
+    }
+
+    pub fn complete(&self, input: &str, cursor: usize) -> Vec<String> {
+        complete(input, cursor, &self.ctx.env.cwd, self.ctx.vfs.as_ref())
+    }
+
+    pub fn history_at(&self, index: usize) -> Option<String> {
+        self.ctx.history.at(index).map(|s| s.to_string())
     }
 
     pub fn last_exit_code(&self) -> i32 {
