@@ -1,57 +1,72 @@
 use crate::builtins::resolve::resolve_path;
 use crate::context::Context;
-use crate::vfs::VfsError;
+use crate::io::ShellIo;
+use crate::vfs::FileType;
 
 pub mod resolve;
 
 /// Run a builtin. Returns `Some(exit_code)` if known, `None` if not a builtin.
-pub fn run_builtin(name: &str, args: &[String], ctx: &mut Context, out: &mut String) -> Option<i32> {
+pub fn run_builtin<'a>(
+    name: &str,
+    args: &[String],
+    ctx: &mut Context,
+    io: &mut ShellIo<'a>,
+) -> Option<i32> {
     match name {
-        "echo" => Some(echo(args, out)),
-        "pwd" => Some(pwd(ctx, out)),
-        "cd" => Some(cd(args, ctx, out)),
+        "echo" => Some(echo(args, io)),
+        "pwd" => Some(pwd(ctx, io)),
+        "cd" => Some(cd(args, ctx, io)),
         "exit" => Some(exit_builtin(args, ctx)),
-        "env" => Some(env_builtin(ctx, out)),
-        "export" => Some(export(args, ctx, out)),
+        "env" => Some(env_builtin(ctx, io)),
+        "export" => Some(export(args, ctx, io)),
         "unset" => Some(unset(args, ctx)),
-        "help" => Some(help(out)),
-        "clear" => Some(clear(out)),
+        "help" => Some(help(io)),
+        "clear" => Some(clear(io)),
         "true" => Some(0),
         "false" => Some(1),
         // File builtins
-        "ls" => Some(ls(args, ctx, out)),
-        "cat" => Some(cat(args, ctx, out)),
-        "mkdir" => Some(mkdir_builtin(args, ctx, out)),
-        "touch" => Some(touch(args, ctx, out)),
-        "rm" => Some(rm(args, ctx, out)),
-        "cp" => Some(cp(args, ctx, out)),
-        "mv" => Some(mv(args, ctx, out)),
+        "ls" => Some(ls(args, ctx, io)),
+        "cat" => Some(cat(args, ctx, io)),
+        "mkdir" => Some(mkdir_builtin(args, ctx, io)),
+        "touch" => Some(touch(args, ctx, io)),
+        "rm" => Some(rm(args, ctx, io)),
+        "cp" => Some(cp(args, ctx, io)),
+        "mv" => Some(mv(args, ctx, io)),
+        // Text-processing builtins (use stdin)
+        "grep" => Some(grep(args, io)),
+        "head" => Some(head(args, io)),
+        "tail" => Some(tail(args, io)),
+        "wc" => Some(wc(args, io)),
+        "sort" => Some(sort_builtin(args, io)),
+        "uniq" => Some(uniq_builtin(io)),
+        "tr" => Some(tr(args, io)),
+        "cut" => Some(cut(args, io)),
         _ => None,
     }
 }
 
 // ── Non-file builtins ──────────────────────────────────────────────────────
 
-fn echo(args: &[String], out: &mut String) -> i32 {
+fn echo(args: &[String], io: &mut ShellIo) -> i32 {
     let (no_newline, words) = if args.first().map(|s| s.as_str()) == Some("-n") {
         (true, &args[1..])
     } else {
         (false, args)
     };
-    out.push_str(&words.join(" "));
+    io.write_out(&words.join(" "));
     if !no_newline {
-        out.push('\n');
+        io.write_out("\n");
     }
     0
 }
 
-fn pwd(ctx: &Context, out: &mut String) -> i32 {
-    out.push_str(&ctx.env.cwd);
-    out.push('\n');
+fn pwd(ctx: &Context, io: &mut ShellIo) -> i32 {
+    io.write_out(&ctx.env.cwd);
+    io.write_out("\n");
     0
 }
 
-fn cd(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn cd(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     let target = match args.first() {
         Some(p) => p.clone(),
         None => ctx.env.home().to_string(),
@@ -70,7 +85,7 @@ fn cd(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
     let new_cwd = resolve_path(&target, &ctx.env.cwd);
 
     if !ctx.vfs.is_dir(&new_cwd) {
-        out.push_str(&format!("cd: {}: No such file or directory\n", new_cwd));
+        io.write_err(&format!("cd: {}: No such file or directory\n", new_cwd));
         return 1;
     }
 
@@ -87,20 +102,20 @@ fn exit_builtin(args: &[String], ctx: &mut Context) -> i32 {
     code
 }
 
-fn env_builtin(ctx: &Context, out: &mut String) -> i32 {
+fn env_builtin(ctx: &Context, io: &mut ShellIo) -> i32 {
     let mut pairs: Vec<String> =
         ctx.env.vars().map(|(k, v)| format!("{}={}", k, v)).collect();
     pairs.sort();
     for pair in pairs {
-        out.push_str(&pair);
-        out.push('\n');
+        io.write_out(&pair);
+        io.write_out("\n");
     }
     0
 }
 
-fn export(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn export(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     if args.is_empty() {
-        return env_builtin(ctx, out);
+        return env_builtin(ctx, io);
     }
     for arg in args {
         if let Some((k, v)) = arg.split_once('=') {
@@ -117,26 +132,27 @@ fn unset(args: &[String], ctx: &mut Context) -> i32 {
     0
 }
 
-fn help(out: &mut String) -> i32 {
-    out.push_str(
-        "wat — a small shell\n\
+fn help(io: &mut ShellIo) -> i32 {
+    io.write_out(
+        "wat -- a small shell\n\
          \n\
          builtins: echo, pwd, cd, exit, env, export, unset, help, clear, true, false\n\
                    ls, cat, mkdir, touch, rm, cp, mv\n\
+                   grep, head, tail, wc, sort, uniq, tr, cut\n\
          \n\
          Hint: try `ls -a` to see what's around.\n",
     );
     0
 }
 
-fn clear(out: &mut String) -> i32 {
-    out.push_str("\x1b[2J\x1b[H");
+fn clear(io: &mut ShellIo) -> i32 {
+    io.write_out("\x1b[2J\x1b[H");
     0
 }
 
 // ── File builtins ──────────────────────────────────────────────────────────
 
-fn ls(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn ls(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     let show_hidden = args.iter().any(|a| a == "-a" || a == "-la" || a == "-al");
     let long = args.iter().any(|a| a == "-l" || a == "-la" || a == "-al");
     let path = args
@@ -154,41 +170,41 @@ fn ls(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
                 }
                 if long {
                     let kind = match entry.file_type {
-                        crate::vfs::FileType::Dir => "d",
-                        crate::vfs::FileType::File => "-",
+                        FileType::Dir => "d",
+                        FileType::File => "-",
                     };
-                    out.push_str(&format!("{} {}\n", kind, entry.name));
+                    io.write_out(&format!("{} {}\n", kind, entry.name));
                 } else {
-                    out.push_str(&entry.name);
-                    out.push('\n');
+                    io.write_out(&entry.name);
+                    io.write_out("\n");
                 }
             }
             0
         }
         Err(e) => {
-            out.push_str(&format!("ls: {}\n", e));
+            io.write_err(&format!("ls: {}\n", e));
             1
         }
     }
 }
 
-fn cat(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
-    if args.is_empty() {
-        out.push_str("cat: no file specified\n");
-        return 1;
+fn cat(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    let file_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    if file_args.is_empty() {
+        // cat with no args: copy stdin to stdout
+        let data = io.stdin.to_vec();
+        io.stdout.extend_from_slice(&data);
+        return 0;
     }
     let mut code = 0;
-    for arg in args {
-        if arg.starts_with('-') {
-            continue;
-        }
+    for arg in file_args {
         let path = resolve_path(arg, &ctx.env.cwd);
         match ctx.vfs.read(&path) {
             Ok(content) => {
-                out.push_str(&String::from_utf8_lossy(&content));
+                io.stdout.extend_from_slice(&content);
             }
             Err(e) => {
-                out.push_str(&format!("cat: {}\n", e));
+                io.write_err(&format!("cat: {}\n", e));
                 code = 1;
             }
         }
@@ -196,37 +212,33 @@ fn cat(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
     code
 }
 
-fn mkdir_builtin(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn mkdir_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     if args.is_empty() {
-        out.push_str("mkdir: missing operand\n");
+        io.write_err("mkdir: missing operand\n");
         return 1;
     }
     let mut code = 0;
-    for arg in args {
-        if arg.starts_with('-') {
-            continue;
-        }
+    for arg in args.iter().filter(|a| !a.starts_with('-')) {
         let path = resolve_path(arg, &ctx.env.cwd);
         if let Err(e) = ctx.vfs.mkdir(&path) {
-            out.push_str(&format!("mkdir: {}\n", e));
+            io.write_err(&format!("mkdir: {}\n", e));
             code = 1;
         }
     }
     code
 }
 
-fn touch(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn touch(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     if args.is_empty() {
-        out.push_str("touch: missing operand\n");
+        io.write_err("touch: missing operand\n");
         return 1;
     }
     let mut code = 0;
     for arg in args {
         let path = resolve_path(arg, &ctx.env.cwd);
-        // Create if not exists; no-op if already a file.
         if !ctx.vfs.exists(&path) {
             if let Err(e) = ctx.vfs.write(&path, b"") {
-                out.push_str(&format!("touch: {}\n", e));
+                io.write_err(&format!("touch: {}\n", e));
                 code = 1;
             }
         }
@@ -234,11 +246,10 @@ fn touch(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
     code
 }
 
-fn rm(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
-    let recursive = args.iter().any(|a| {
-        a == "-r" || a == "-rf" || a == "-fr" || a == "-R" || a == "-f" && false // -f alone isn't recursive
-    }) || args.iter().any(|a| a.contains('r'));
-    let force = args.iter().any(|a| a.contains('f'));
+fn rm(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    let flags: String = args.iter().filter(|a| a.starts_with('-')).cloned().collect::<Vec<_>>().concat();
+    let recursive = flags.contains('r') || flags.contains('R');
+    let force = flags.contains('f');
 
     let paths: Vec<String> = args
         .iter()
@@ -247,16 +258,13 @@ fn rm(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
         .collect();
 
     if paths.is_empty() {
-        out.push_str("rm: missing operand\n");
+        io.write_err("rm: missing operand\n");
         return 1;
     }
 
-    // Guard: never allow removing / or everything under /
     for path in &paths {
-        if path == "/" || path == "/*" || path == "/~" {
-            out.push_str(
-                "rm: nice try. the void stares back, but your filesystem does not.\n",
-            );
+        if path == "/" || path == "/*" {
+            io.write_out("rm: nice try. the void stares back, but your filesystem does not.\n");
             return 1;
         }
     }
@@ -265,7 +273,7 @@ fn rm(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
     for path in &paths {
         if let Err(e) = ctx.vfs.remove(path, recursive) {
             if !force {
-                out.push_str(&format!("rm: {}\n", e));
+                io.write_err(&format!("rm: {}\n", e));
                 code = 1;
             }
         }
@@ -273,36 +281,170 @@ fn rm(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
     code
 }
 
-fn cp(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn cp(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     let non_flags: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if non_flags.len() < 2 {
-        out.push_str("cp: missing operand\n");
+        io.write_err("cp: missing operand\n");
         return 1;
     }
     let src = resolve_path(non_flags[0], &ctx.env.cwd);
     let dst = resolve_path(non_flags[1], &ctx.env.cwd);
     match ctx.vfs.copy(&src, &dst) {
         Ok(()) => 0,
-        Err(e) => {
-            out.push_str(&format!("cp: {}\n", e));
-            1
-        }
+        Err(e) => { io.write_err(&format!("cp: {}\n", e)); 1 }
     }
 }
 
-fn mv(args: &[String], ctx: &mut Context, out: &mut String) -> i32 {
+fn mv(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     let non_flags: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if non_flags.len() < 2 {
-        out.push_str("mv: missing operand\n");
+        io.write_err("mv: missing operand\n");
         return 1;
     }
     let src = resolve_path(non_flags[0], &ctx.env.cwd);
     let dst = resolve_path(non_flags[1], &ctx.env.cwd);
     match ctx.vfs.rename(&src, &dst) {
         Ok(()) => 0,
-        Err(e) => {
-            out.push_str(&format!("mv: {}\n", e));
-            1
+        Err(e) => { io.write_err(&format!("mv: {}\n", e)); 1 }
+    }
+}
+
+// ── Text-processing builtins ───────────────────────────────────────────────
+
+fn grep(args: &[String], io: &mut ShellIo) -> i32 {
+    let pattern = match args.first() {
+        Some(p) => p.as_str(),
+        None => { io.write_err("grep: missing pattern\n"); return 1; }
+    };
+    let input = io.stdin_str().to_string();
+    let mut matched = false;
+    for line in input.lines() {
+        if line.contains(pattern) {
+            io.write_out(line);
+            io.write_out("\n");
+            matched = true;
         }
     }
+    if matched { 0 } else { 1 }
+}
+
+fn head(args: &[String], io: &mut ShellIo) -> i32 {
+    let n = parse_n_flag(args, 10);
+    let input = io.stdin_str().to_string();
+    for line in input.lines().take(n) {
+        io.write_out(line);
+        io.write_out("\n");
+    }
+    0
+}
+
+fn tail(args: &[String], io: &mut ShellIo) -> i32 {
+    let n = parse_n_flag(args, 10);
+    let input = io.stdin_str().to_string();
+    let lines: Vec<&str> = input.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    for line in &lines[start..] {
+        io.write_out(line);
+        io.write_out("\n");
+    }
+    0
+}
+
+fn wc(args: &[String], io: &mut ShellIo) -> i32 {
+    let count_lines = args.iter().any(|a| a == "-l");
+    let count_words = args.iter().any(|a| a == "-w");
+    let count_chars = args.iter().any(|a| a == "-c");
+    let all = !count_lines && !count_words && !count_chars;
+    let input = io.stdin_str().to_string();
+    let lines = input.lines().count();
+    let words = input.split_whitespace().count();
+    let chars = input.len();
+    if all {
+        io.write_out(&format!("{} {} {}\n", lines, words, chars));
+    } else {
+        let mut parts = Vec::new();
+        if count_lines { parts.push(lines.to_string()); }
+        if count_words { parts.push(words.to_string()); }
+        if count_chars { parts.push(chars.to_string()); }
+        io.write_out(&parts.join(" "));
+        io.write_out("\n");
+    }
+    0
+}
+
+fn sort_builtin(args: &[String], io: &mut ShellIo) -> i32 {
+    let reverse = args.iter().any(|a| a == "-r");
+    let input = io.stdin_str().to_string();
+    let mut lines: Vec<&str> = input.lines().collect();
+    lines.sort_unstable();
+    if reverse { lines.reverse(); }
+    for line in lines {
+        io.write_out(line);
+        io.write_out("\n");
+    }
+    0
+}
+
+fn uniq_builtin(io: &mut ShellIo) -> i32 {
+    let input = io.stdin_str().to_string();
+    let mut prev: Option<&str> = None;
+    for line in input.lines() {
+        if prev != Some(line) {
+            io.write_out(line);
+            io.write_out("\n");
+            prev = Some(line);
+        }
+    }
+    0
+}
+
+fn tr(args: &[String], io: &mut ShellIo) -> i32 {
+    if args.len() < 2 {
+        io.write_err("tr: missing operand\n");
+        return 1;
+    }
+    let from: Vec<char> = args[0].chars().collect();
+    let to: Vec<char> = args[1].chars().collect();
+    let input = io.stdin_str().to_string();
+    let out: String = input.chars().map(|c| {
+        if let Some(pos) = from.iter().position(|&f| f == c) {
+            *to.get(pos).unwrap_or(&c)
+        } else {
+            c
+        }
+    }).collect();
+    io.write_out(&out);
+    0
+}
+
+fn cut(args: &[String], io: &mut ShellIo) -> i32 {
+    let delim = args.windows(2)
+        .find(|w| w[0] == "-d")
+        .and_then(|w| w[1].chars().next())
+        .unwrap_or('\t');
+    let field = args.windows(2)
+        .find(|w| w[0] == "-f")
+        .and_then(|w| w[1].parse::<usize>().ok())
+        .unwrap_or(1);
+    let input = io.stdin_str().to_string();
+    for line in input.lines() {
+        let parts: Vec<&str> = line.splitn(field + 1, delim).collect();
+        if let Some(part) = parts.get(field - 1) {
+            io.write_out(part);
+            io.write_out("\n");
+        }
+    }
+    0
+}
+
+fn parse_n_flag(args: &[String], default: usize) -> usize {
+    args.windows(2)
+        .find(|w| w[0] == "-n")
+        .and_then(|w| w[1].parse().ok())
+        .or_else(|| {
+            args.iter()
+                .find(|a| a.starts_with("-n") && a.len() > 2)
+                .and_then(|a| a[2..].parse().ok())
+        })
+        .unwrap_or(default)
 }

@@ -11,6 +11,10 @@ pub enum Token {
     RedirectOut,
     /// `>>`
     RedirectAppend,
+    /// `2>`
+    Redirect2Out,
+    /// `2>>`
+    Redirect2Append,
     /// `;`
     Semicolon,
     /// `&&`
@@ -27,6 +31,8 @@ impl Token {
     /// Returns the canonical text representation of the token (used for round-trip tests).
     pub fn display(&self) -> &str {
         match self {
+            Token::Redirect2Out => "2>",
+            Token::Redirect2Append => "2>>",
             Token::Pipe => "|",
             Token::RedirectIn => "<",
             Token::RedirectOut => ">",
@@ -209,6 +215,16 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                         message: "trailing backslash".to_string(),
                         offset,
                     });
+                }
+            }
+            // `2>` and `2>>` stderr redirects (only when 2 is immediately followed by >)
+            '2' if i + 1 < chars.len() && chars[i + 1] == '>' => {
+                if i + 2 < chars.len() && chars[i + 2] == '>' {
+                    tokens.push(Spanned { token: Token::Redirect2Append, offset });
+                    i += 3;
+                } else {
+                    tokens.push(Spanned { token: Token::Redirect2Out, offset });
+                    i += 2;
                 }
             }
             _ => {

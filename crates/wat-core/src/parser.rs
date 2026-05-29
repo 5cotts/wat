@@ -140,6 +140,16 @@ impl Parser {
                     let target = self.expect_word("expected filename after '<'")?;
                     redirects.push(Redirect::In(target));
                 }
+                Token::Redirect2Out => {
+                    self.advance();
+                    let target = self.expect_word("expected filename after '2>'")?;
+                    redirects.push(Redirect::Err(target));
+                }
+                Token::Redirect2Append => {
+                    self.advance();
+                    let target = self.expect_word("expected filename after '2>>'")?;
+                    redirects.push(Redirect::Err(target)); // append not tracked separately yet
+                }
                 _ => break,
             }
         }

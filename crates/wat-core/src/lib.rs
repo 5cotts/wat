@@ -4,6 +4,7 @@ pub mod context;
 pub mod env;
 pub mod eval;
 pub mod expand;
+pub mod io;
 pub mod lexer;
 pub mod parser;
 pub mod shell;
