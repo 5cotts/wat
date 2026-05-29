@@ -1,16 +1,15 @@
 use crate::env::Env;
+use crate::eval::eval;
+use crate::parser::parse;
 
 pub struct Shell {
-    env: Env,
+    pub env: Env,
     pub exit_requested: bool,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        Self {
-            env: Env::new(),
-            exit_requested: false,
-        }
+        Self { env: Env::new(), exit_requested: false }
     }
 
     pub fn prompt(&self) -> String {
@@ -23,24 +22,26 @@ impl Shell {
             return String::new();
         }
 
+        // Check for exit before parsing (handles `exit`, `exit N`)
         if input == "exit" {
             self.env.last_exit_code = 0;
             self.exit_requested = true;
             return String::new();
         }
         if let Some(rest) = input.strip_prefix("exit ") {
-            match rest.trim().parse::<i32>() {
-                Ok(code) => {
-                    self.env.last_exit_code = code;
-                    self.exit_requested = true;
-                    return String::new();
-                }
-                Err(_) => return "exit: invalid argument\n".to_string(),
-            }
+            let code = rest.trim().parse::<i32>().unwrap_or(0);
+            self.env.last_exit_code = code;
+            self.exit_requested = true;
+            return String::new();
         }
 
-        // Phase 0: echo input back
-        format!("{}\n", input)
+        match parse(input) {
+            Ok(list) => {
+                let (_, output) = eval(&list, &mut self.env);
+                output
+            }
+            Err(e) => format!("wat: {}\n", e),
+        }
     }
 
     pub fn last_exit_code(&self) -> i32 {

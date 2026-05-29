@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 pub struct Env {
-    vars: HashMap<String, String>,
+    pub vars: HashMap<String, String>,
     pub cwd: String,
     pub last_exit_code: i32,
 }
@@ -13,11 +13,7 @@ impl Env {
         vars.insert("HOME".to_string(), home.clone());
         vars.insert("PWD".to_string(), home.clone());
         vars.insert("PATH".to_string(), "/usr/local/bin:/usr/bin:/bin".to_string());
-        Self {
-            vars,
-            cwd: home,
-            last_exit_code: 0,
-        }
+        Self { vars, cwd: home, last_exit_code: 0 }
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -26,6 +22,14 @@ impl Env {
 
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.vars.insert(key.into(), value.into());
+    }
+
+    pub fn unset(&mut self, key: &str) {
+        self.vars.remove(key);
+    }
+
+    pub fn vars(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     pub fn home(&self) -> &str {
