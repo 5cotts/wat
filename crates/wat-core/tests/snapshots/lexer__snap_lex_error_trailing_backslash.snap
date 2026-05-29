@@ -1,0 +1,8 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: err
+---
+LexError {
+    message: "trailing backslash",
+    offset: 5,
+}

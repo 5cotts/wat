@@ -1,0 +1,7 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"\").unwrap()"
+---
+List(
+    [],
+)

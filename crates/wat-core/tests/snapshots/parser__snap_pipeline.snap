@@ -1,0 +1,27 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"ls | grep foo\").unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "ls",
+                        args: [],
+                        redirects: [],
+                    },
+                    Command {
+                        name: "grep",
+                        args: [
+                            "foo",
+                        ],
+                        redirects: [],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

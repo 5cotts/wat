@@ -1,0 +1,22 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"a | b | c | d\")"
+---
+[
+    Word(
+        "a",
+    ),
+    Pipe,
+    Word(
+        "b",
+    ),
+    Pipe,
+    Word(
+        "c",
+    ),
+    Pipe,
+    Word(
+        "d",
+    ),
+    Eof,
+]

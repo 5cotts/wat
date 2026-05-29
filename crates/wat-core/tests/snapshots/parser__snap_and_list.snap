@@ -1,0 +1,32 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"a && b\").unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "a",
+                        args: [],
+                        redirects: [],
+                    },
+                ],
+            ),
+            And,
+        ),
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "b",
+                        args: [],
+                        redirects: [],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

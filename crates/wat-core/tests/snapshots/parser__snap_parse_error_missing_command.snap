@@ -1,0 +1,8 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\">\").unwrap_err()"
+---
+ParseError {
+    message: "expected filename after '>'",
+    offset: 1,
+}

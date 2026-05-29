@@ -1,0 +1,16 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"ls -la /tmp\")"
+---
+[
+    Word(
+        "ls",
+    ),
+    Word(
+        "-la",
+    ),
+    Word(
+        "/tmp",
+    ),
+    Eof,
+]

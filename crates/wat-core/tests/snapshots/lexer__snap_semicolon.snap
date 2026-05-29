@@ -1,0 +1,18 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"a ; b ; c\")"
+---
+[
+    Word(
+        "a",
+    ),
+    Semicolon,
+    Word(
+        "b",
+    ),
+    Semicolon,
+    Word(
+        "c",
+    ),
+    Eof,
+]

@@ -1,0 +1,31 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(r#\"echo \"hello world\" | grep h > out.txt && cat out.txt\"#)"
+---
+[
+    Word(
+        "echo",
+    ),
+    Word(
+        "hello world",
+    ),
+    Pipe,
+    Word(
+        "grep",
+    ),
+    Word(
+        "h",
+    ),
+    RedirectOut,
+    Word(
+        "out.txt",
+    ),
+    And,
+    Word(
+        "cat",
+    ),
+    Word(
+        "out.txt",
+    ),
+    Eof,
+]

@@ -1,0 +1,13 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(r#\"echo \"$HOME\"\"#)"
+---
+[
+    Word(
+        "echo",
+    ),
+    Word(
+        "$HOME",
+    ),
+    Eof,
+]

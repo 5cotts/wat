@@ -1,0 +1,14 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"a\\nb\")"
+---
+[
+    Word(
+        "a",
+    ),
+    Newline,
+    Word(
+        "b",
+    ),
+    Eof,
+]

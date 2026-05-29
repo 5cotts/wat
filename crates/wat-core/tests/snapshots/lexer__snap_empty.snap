@@ -1,0 +1,7 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"\")"
+---
+[
+    Eof,
+]

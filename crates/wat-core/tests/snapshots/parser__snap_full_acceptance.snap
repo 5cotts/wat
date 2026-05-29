@@ -1,0 +1,47 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(r#\"echo \"hello world\" | grep h > out.txt && cat out.txt\"#).unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "echo",
+                        args: [
+                            "hello world",
+                        ],
+                        redirects: [],
+                    },
+                    Command {
+                        name: "grep",
+                        args: [
+                            "h",
+                        ],
+                        redirects: [
+                            Out(
+                                "out.txt",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+            And,
+        ),
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "cat",
+                        args: [
+                            "out.txt",
+                        ],
+                        redirects: [],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

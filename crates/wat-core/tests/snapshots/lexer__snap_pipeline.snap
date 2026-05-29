@@ -1,0 +1,17 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"ls | grep foo\")"
+---
+[
+    Word(
+        "ls",
+    ),
+    Pipe,
+    Word(
+        "grep",
+    ),
+    Word(
+        "foo",
+    ),
+    Eof,
+]

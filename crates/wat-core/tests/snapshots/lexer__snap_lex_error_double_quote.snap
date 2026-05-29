@@ -1,0 +1,8 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: err
+---
+LexError {
+    message: "unterminated double quote",
+    offset: 0,
+}

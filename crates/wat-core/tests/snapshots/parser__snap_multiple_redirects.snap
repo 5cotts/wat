@@ -1,0 +1,27 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"cmd < in.txt > out.txt\").unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "cmd",
+                        args: [],
+                        redirects: [
+                            In(
+                                "in.txt",
+                            ),
+                            Out(
+                                "out.txt",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

@@ -1,0 +1,14 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"cat < in.txt\")"
+---
+[
+    Word(
+        "cat",
+    ),
+    RedirectIn,
+    Word(
+        "in.txt",
+    ),
+    Eof,
+]

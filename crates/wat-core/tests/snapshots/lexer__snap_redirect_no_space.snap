@@ -1,0 +1,17 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"echo hi>out.txt\")"
+---
+[
+    Word(
+        "echo",
+    ),
+    Word(
+        "hi",
+    ),
+    RedirectOut,
+    Word(
+        "out.txt",
+    ),
+    Eof,
+]

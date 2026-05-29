@@ -1,0 +1,44 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"a ; b ; c\").unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "a",
+                        args: [],
+                        redirects: [],
+                    },
+                ],
+            ),
+            Semi,
+        ),
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "b",
+                        args: [],
+                        redirects: [],
+                    },
+                ],
+            ),
+            Semi,
+        ),
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "c",
+                        args: [],
+                        redirects: [],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

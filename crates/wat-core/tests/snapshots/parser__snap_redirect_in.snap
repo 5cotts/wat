@@ -1,0 +1,24 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"cat < in.txt\").unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "cat",
+                        args: [],
+                        redirects: [
+                            In(
+                                "in.txt",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

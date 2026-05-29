@@ -1,0 +1,26 @@
+---
+source: crates/wat-core/tests/parser.rs
+expression: "parse(\"echo hi > out.txt\").unwrap()"
+---
+List(
+    [
+        (
+            Pipeline(
+                [
+                    Command {
+                        name: "echo",
+                        args: [
+                            "hi",
+                        ],
+                        redirects: [
+                            Out(
+                                "out.txt",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+            End,
+        ),
+    ],
+)

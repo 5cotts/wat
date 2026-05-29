@@ -1,0 +1,13 @@
+---
+source: crates/wat-core/tests/lexer.rs
+expression: "toks(\"echo 'hello world'\")"
+---
+[
+    Word(
+        "echo",
+    ),
+    Word(
+        "hello world",
+    ),
+    Eof,
+]
