@@ -1,3 +1,13 @@
 [workspace]
 members = ["crates/wat-core", "crates/wat-cli", "crates/wat-wasm"]
 resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"

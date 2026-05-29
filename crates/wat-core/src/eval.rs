@@ -71,6 +71,13 @@ fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec
         glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
     }).collect();
 
+    // Rewrite `bash whoami.sh` / `sh whoami.sh` → easter egg command
+    let name = if (name == "bash" || name == "sh") && args.first().map(|s| s.as_str()) == Some("whoami.sh") {
+        "bash whoami.sh".to_string()
+    } else {
+        name
+    };
+
     // Determine effective stdin (may be overridden by `< file`)
     let stdin_bytes: Vec<u8> = cmd
         .redirects

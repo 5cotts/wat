@@ -8,9 +8,13 @@ bootstrap:
 build-native:
     cargo build -p wat-cli --release
 
-# Build the WASM package for the web
+# Build the WASM package for the web (dev mode)
 build-wasm:
     {{wasm-pack}} build crates/wat-wasm --target web --out-dir ../../web/pkg
+
+# Build an optimized release WASM package
+build-wasm-release:
+    RUSTFLAGS="-C panic=abort" {{wasm-pack}} build crates/wat-wasm --release --target web --out-dir ../../web/pkg
 
 # Start the Vite dev server (run build-wasm first)
 dev-web: build-wasm

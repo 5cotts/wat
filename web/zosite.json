@@ -1,0 +1,5 @@
+{
+  "name": "wat",
+  "description": "A POSIX-flavored shell written in Rust that compiles to WebAssembly",
+  "framework": "vite-vanilla"
+}

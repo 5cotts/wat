@@ -3,6 +3,7 @@ use crate::context::Context;
 use crate::io::ShellIo;
 use crate::vfs::FileType;
 
+pub mod easter;
 pub mod resolve;
 
 /// Run a builtin. Returns `Some(exit_code)` if known, `None` if not a builtin.
@@ -21,7 +22,7 @@ pub fn run_builtin<'a>(
         "env" => Some(env_builtin(ctx, io)),
         "export" => Some(export(args, ctx, io)),
         "unset" => Some(unset(args, ctx)),
-        "help" => Some(help(io)),
+        "help" => Some(easter::help_easter(io)),
         "clear" => Some(clear(io)),
         "true" => Some(0),
         "false" => Some(1),
@@ -43,6 +44,12 @@ pub fn run_builtin<'a>(
         "tr" => Some(tr(args, io)),
         "cut" => Some(cut(args, io)),
         "history" => Some(history_builtin(ctx, io)),
+        // Easter eggs
+        "sudo" => Some(easter::sudo(io)),
+        "vim" | "vi" | "nano" | "emacs" => Some(easter::editor_trap(name, io)),
+        "sl" => Some(easter::sl(io)),
+        "./whoami.sh" | "bash whoami.sh" | "sh whoami.sh" => Some(easter::whoami_sh(io)),
+        "__konami__" => Some(easter::konami(io)),
         _ => None,
     }
 }
@@ -138,19 +145,6 @@ fn unset(args: &[String], ctx: &mut Context) -> i32 {
     for arg in args {
         ctx.env.unset(arg);
     }
-    0
-}
-
-fn help(io: &mut ShellIo) -> i32 {
-    io.write_out(
-        "wat -- a small shell\n\
-         \n\
-         builtins: echo, pwd, cd, exit, env, export, unset, help, clear, true, false\n\
-                   ls, cat, mkdir, touch, rm, cp, mv\n\
-                   grep, head, tail, wc, sort, uniq, tr, cut\n\
-         \n\
-         Hint: try `ls -a` to see what's around.\n",
-    );
     0
 }
 
