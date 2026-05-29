@@ -1,0 +1,11 @@
+[package]
+name = "wat-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wat"
+path = "src/main.rs"
+
+[dependencies]
+wat-core = { path = "../wat-core", features = ["native-fs"] }

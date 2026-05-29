@@ -1,0 +1,17 @@
+[package]
+name = "wat-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+native-fs = []
+
+[dependencies]
+
+[dev-dependencies]
+insta = "1"
+proptest = "1"
