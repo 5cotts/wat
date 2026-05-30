@@ -138,6 +138,46 @@ impl Shell {
         self.ctx.env.last_exit_code = code;
     }
 
+    /// Returns true if `input` should be routed through the PTY path
+    /// instead of the buffered piped path. Used by `wat-cli` (combined
+    /// with a TTY check on its own stdin).
+    ///
+    /// True iff:
+    /// 1. `input` parses cleanly.
+    /// 2. The parsed list is a single pipeline of a single command (no
+    ///    `;`, no `&&`/`||`, no `|`).
+    /// 3. That command has no redirects (no `<`, `>`, `>>`, `2>`).
+    /// 4. The command name does not resolve to a wat builtin.
+    /// 5. The command name resolves on PATH via `process_host.lookup`.
+    #[cfg(feature = "native-pty")]
+    pub fn pty_eligible(&self, input: &str) -> bool {
+        use crate::expand::expand_word;
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let Ok(list) = parse(trimmed) else {
+            return false;
+        };
+        if list.0.len() != 1 {
+            return false;
+        }
+        let (pipeline, _sep) = &list.0[0];
+        if pipeline.0.len() != 1 {
+            return false;
+        }
+        let cmd = &pipeline.0[0];
+        if !cmd.redirects.is_empty() {
+            return false;
+        }
+        let name = expand_word(&cmd.name, &self.ctx.env);
+        if crate::builtins::is_builtin(&name) {
+            return false;
+        }
+        self.ctx.process_host.lookup(&name).is_some()
+    }
+
     pub fn prompt(&self) -> String {
         format!("5cotts@zo {} % ", self.ctx.env.prompt_cwd())
     }

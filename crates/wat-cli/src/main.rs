@@ -55,10 +55,11 @@ fn main() {
         cancel.store(false, Ordering::Relaxed);
 
         // PTY path for interactive foreground commands when our stdin is
-        // a real TTY. Phase B uses a small allowlist; Phase D replaces it
-        // with the full routing rule (single-command pipeline, no
-        // redirects, not a builtin, on PATH).
-        if stdin_is_tty && pty_eligible(&line) {
+        // a real TTY. The routing rule (single-command pipeline, no
+        // redirects, not a builtin, resolves on PATH) lives in
+        // `Shell::pty_eligible` so it can stay in sync with the parser
+        // and the builtin set.
+        if stdin_is_tty && shell.pty_eligible(&line) {
             let exit = run_in_pty(&mut shell, &line);
             shell.set_last_exit_code(exit);
         } else {
@@ -82,41 +83,6 @@ fn main() {
         print!("{}", shell.prompt());
         stdout.lock().flush().unwrap();
     }
-}
-
-/// Phase B routing: a tiny allowlist of programs that we know want a real
-/// terminal. Phase D replaces this with the full parse-tree-aware check
-/// `Shell::pty_eligible`. We also reject anything that has operators that
-/// would force the piped path (`|`, `>`, `<`, `;`, `&&`, `||`) so a
-/// pipeline of one of the allowed names still goes through `feed_streaming`.
-fn pty_eligible(input: &str) -> bool {
-    let trimmed = input.trim();
-    if trimmed.contains('|')
-        || trimmed.contains('>')
-        || trimmed.contains('<')
-        || trimmed.contains(';')
-        || trimmed.contains("&&")
-        || trimmed.contains("||")
-    {
-        return false;
-    }
-    let first = trimmed.split_whitespace().next().unwrap_or("");
-    matches!(
-        first,
-        "vim"
-            | "vi"
-            | "nano"
-            | "less"
-            | "more"
-            | "htop"
-            | "top"
-            | "man"
-            | "ssh"
-            | "python"
-            | "python3"
-            | "node"
-            | "irb"
-    )
 }
 
 /// RAII guard around `crossterm::terminal::enable_raw_mode`. Drop restores

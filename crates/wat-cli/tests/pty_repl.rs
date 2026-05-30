@@ -232,6 +232,111 @@ fn resize_propagates_to_running_pty_child() {
 }
 
 #[test]
+fn pipelines_still_use_piped_path() {
+    // Multiple segments → not PTY-eligible. Must go through the buffered
+    // streaming path and produce the captured wc -w result.
+    let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer.write_all(b"echo a b c | wc -w\n").expect("write");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    // wc -w prints "3" (possibly with leading whitespace).
+    let body = after
+        .lines()
+        .find(|l| l.trim() == "3" || l.trim().starts_with('3'))
+        .unwrap_or("");
+    assert!(
+        body.trim() == "3" || body.trim().starts_with('3'),
+        "expected '3' from `echo a b c | wc -w`, got: {:?}",
+        after
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().ok();
+            panic!("wat did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn redirects_still_use_piped_path() {
+    // Output redirect → must NOT use PTY. Write hello to /tmp/<unique>,
+    // then cat it back to verify the byte landed via the piped path.
+    let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    let path = format!("/tmp/wat-tier2-d-redirect-{}", std::process::id());
+    // Use the wat builtin `echo` (which always goes through the piped
+    // path) so we don't depend on /bin/echo being on PATH inside the
+    // shell's tracked env. The interesting bit is the `>` operator.
+    let cmd = format!("echo hello > {}\n", path);
+    writer.write_all(cmd.as_bytes()).expect("write 1");
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    let read_cmd = format!("/bin/cat {}\n", path);
+    writer.write_all(read_cmd.as_bytes()).expect("write 2");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(after.contains("hello"), "got: {:?}", after);
+
+    writer.write_all(b"exit\n").expect("exit");
+    let _ = std::fs::remove_file(&path);
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().ok();
+            panic!("wat did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn pty_command_exit_code_propagates() {
+    // The PTY child's exit code must end up in $?.
+    let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer
+        .write_all(b"python3 -c 'import sys; sys.exit(7)'\n")
+        .expect("write 1");
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer.write_all(b"echo $?\n").expect("write 2");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains('7'),
+        "expected exit code 7 to surface via $?, got: {:?}",
+        after
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().ok();
+            panic!("wat did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn repl_pty_command_nonzero_exit_does_not_hang_repl() {
     let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
     let deadline = || Instant::now() + READ_TIMEOUT;

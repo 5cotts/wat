@@ -152,24 +152,9 @@ mod native {
                 .child
                 .wait()
                 .map_err(|e| io::Error::other(e.to_string()))?;
-            // portable-pty's ExitStatus only exposes a u32 success/code via
-            // `exit_code()`. On Unix, when the child is killed by a signal,
-            // `exit_code()` returns the raw wait status with the signal in
-            // the low bits — we recover `128 + signum` to match how
-            // `NativeChild::wait` reports things.
-            let code = status.exit_code();
-            #[cfg(unix)]
-            {
-                // wait(2) layout: low 7 bits = signal when not exit, bit 7 = core dump,
-                // high bits = exit code on normal exit. portable-pty already maps
-                // normal exits to the exit code; for signal exits it returns the raw
-                // status, so anything with the low 7 bits set is a signal kill.
-                let signum = (code & 0x7f) as i32;
-                if signum != 0 && signum != 0x7f && !status.success() && code <= 0xff {
-                    return Ok(128 + signum);
-                }
-            }
-            Ok(code as i32)
+            // portable-pty already encodes signal exits as 128 + signum
+            // in `exit_code()` on Unix, so we don't need to re-decode.
+            Ok(status.exit_code() as i32)
         }
 
         fn signal(&mut self, sig: Signal) -> io::Result<()> {
