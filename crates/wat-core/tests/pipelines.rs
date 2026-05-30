@@ -15,7 +15,13 @@ fn pipe_ls_grep_wc() {
     let mut sh = sh();
     // ls /home/5cotts | grep .sh | wc -l
     let out = feed(&mut sh, "ls /home/5cotts | grep .sh | wc -l");
-    let count: usize = out.trim().split_whitespace().next().unwrap_or("0").parse().unwrap();
+    let count: usize = out
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap();
     assert!(count >= 1, "expected at least one .sh file, got: {:?}", out);
 }
 
@@ -123,15 +129,23 @@ fn redirect_stderr() {
     // cat nonexistent 2> err.txt; cat err.txt
     feed(&mut sh, "cat /nonexistent 2>/home/5cotts/err.txt");
     let out = feed(&mut sh, "cat /home/5cotts/err.txt");
-    assert!(!out.is_empty(), "stderr should have been written to err.txt");
-    assert!(out.contains("No such file or directory") || out.contains("not found") || out.len() > 0);
+    assert!(
+        !out.is_empty(),
+        "stderr should have been written to err.txt"
+    );
+    assert!(
+        out.contains("No such file or directory") || out.contains("not found") || out.len() > 0
+    );
 }
 
 #[test]
 fn acceptance_redirect_out() {
     // `echo hi > test.txt; cat test.txt` prints `hi`
     let mut sh = sh();
-    let out = feed(&mut sh, "echo hi > /home/5cotts/t.txt; cat /home/5cotts/t.txt");
+    let out = feed(
+        &mut sh,
+        "echo hi > /home/5cotts/t.txt; cat /home/5cotts/t.txt",
+    );
     assert_eq!(out.trim(), "hi");
 }
 
@@ -139,7 +153,10 @@ fn acceptance_redirect_out() {
 fn acceptance_stderr_redirect() {
     // `cat nonexistent 2> err.txt; cat err.txt` shows the error message
     let mut sh = sh();
-    let out = feed(&mut sh, "cat /no_such_file 2>/home/5cotts/err2.txt; cat /home/5cotts/err2.txt");
+    let out = feed(
+        &mut sh,
+        "cat /no_such_file 2>/home/5cotts/err2.txt; cat /home/5cotts/err2.txt",
+    );
     assert!(!out.is_empty());
 }
 

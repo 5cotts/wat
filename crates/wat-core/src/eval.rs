@@ -40,7 +40,11 @@ pub fn eval(list: &List, ctx: &mut Context) -> (i32, String) {
 
 /// Run a pipeline, chaining stdout of each command to stdin of the next.
 /// Returns `(exit_code, stdout_bytes, stderr_bytes)`.
-fn eval_pipeline(pipeline: &Pipeline, ctx: &mut Context, initial_stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
+fn eval_pipeline(
+    pipeline: &Pipeline,
+    ctx: &mut Context,
+    initial_stdin: &[u8],
+) -> (i32, Vec<u8>, Vec<u8>) {
     let cmds = &pipeline.0;
     let mut stdin_data: Vec<u8> = initial_stdin.to_vec();
     let mut all_stderr: Vec<u8> = Vec::new();
@@ -64,13 +68,19 @@ fn eval_pipeline(pipeline: &Pipeline, ctx: &mut Context, initial_stdin: &[u8]) -
 fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
     let name = expand_word(&cmd.name, &ctx.env);
     // Expand variables then glob-expand each argument
-    let args: Vec<String> = cmd.args.iter().flat_map(|a| {
-        let expanded = expand_word(a, &ctx.env);
-        glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
-    }).collect();
+    let args: Vec<String> = cmd
+        .args
+        .iter()
+        .flat_map(|a| {
+            let expanded = expand_word(a, &ctx.env);
+            glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
+        })
+        .collect();
 
     // Rewrite `bash whoami.sh` / `sh whoami.sh` → easter egg command
-    let name = if (name == "bash" || name == "sh") && args.first().map(|s| s.as_str()) == Some("whoami.sh") {
+    let name = if (name == "bash" || name == "sh")
+        && args.first().map(|s| s.as_str()) == Some("whoami.sh")
+    {
         "bash whoami.sh".to_string()
     } else {
         name
@@ -94,7 +104,11 @@ fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec
     let mut stderr: Vec<u8> = Vec::new();
 
     let code = {
-        let mut io = ShellIo { stdin: &stdin_bytes, stdout: &mut stdout, stderr: &mut stderr };
+        let mut io = ShellIo {
+            stdin: &stdin_bytes,
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
         match run_builtin(&name, &args, ctx, &mut io) {
             Some(c) => c,
             None => {

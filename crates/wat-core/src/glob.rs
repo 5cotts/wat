@@ -61,7 +61,10 @@ fn split_glob_path(pattern: &str, cwd: &str) -> (String, String) {
 
 /// Match a filename against a glob pattern (no `/` in either).
 pub fn match_glob(pattern: &str, name: &str) -> bool {
-    match_glob_chars(&pattern.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+    match_glob_chars(
+        &pattern.chars().collect::<Vec<_>>(),
+        &name.chars().collect::<Vec<_>>(),
+    )
 }
 
 fn match_glob_chars(pat: &[char], name: &[char]) -> bool {
@@ -76,17 +79,13 @@ fn match_glob_chars(pat: &[char], name: &[char]) -> bool {
             }
             false
         }
-        Some('?') => {
-            !name.is_empty() && match_glob_chars(&pat[1..], &name[1..])
-        }
+        Some('?') => !name.is_empty() && match_glob_chars(&pat[1..], &name[1..]),
         Some('[') => {
             // Character class: [abc], [a-z], [!abc] (negated not implemented, skip)
             let (matched, rest) = match_char_class(&pat[1..], name.first().copied());
             matched && match_glob_chars(rest, if name.is_empty() { &[] } else { &name[1..] })
         }
-        Some(p) => {
-            name.first() == Some(p) && match_glob_chars(&pat[1..], &name[1..])
-        }
+        Some(p) => name.first() == Some(p) && match_glob_chars(&pat[1..], &name[1..]),
     }
 }
 
@@ -112,7 +111,11 @@ fn match_char_class(pat: &[char], c: Option<char>) -> (bool, &[char]) {
             i += 1;
         }
     }
-    let rest = if i < pat.len() { &pat[i + 1..] } else { &pat[i..] };
+    let rest = if i < pat.len() {
+        &pat[i + 1..]
+    } else {
+        &pat[i..]
+    };
     (matched, rest)
 }
 

@@ -10,11 +10,17 @@ pub struct Shell {
 
 impl Shell {
     pub fn new() -> Self {
-        Self { ctx: Context::new(), exit_requested: false }
+        Self {
+            ctx: Context::new(),
+            exit_requested: false,
+        }
     }
 
     pub fn with_memory_vfs() -> Self {
-        Self { ctx: Context::with_memory_vfs(), exit_requested: false }
+        Self {
+            ctx: Context::with_memory_vfs(),
+            exit_requested: false,
+        }
     }
 
     pub fn prompt(&self) -> String {

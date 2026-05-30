@@ -113,14 +113,20 @@ fn cd(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
 }
 
 fn exit_builtin(args: &[String], ctx: &mut Context) -> i32 {
-    let code = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+    let code = args
+        .first()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0);
     ctx.env.last_exit_code = code;
     code
 }
 
 fn env_builtin(ctx: &Context, io: &mut ShellIo) -> i32 {
-    let mut pairs: Vec<String> =
-        ctx.env.vars().map(|(k, v)| format!("{}={}", k, v)).collect();
+    let mut pairs: Vec<String> = ctx
+        .env
+        .vars()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
     pairs.sort();
     for pair in pairs {
         io.write_out(&pair);
@@ -250,7 +256,12 @@ fn touch(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
 }
 
 fn rm(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
-    let flags: String = args.iter().filter(|a| a.starts_with('-')).cloned().collect::<Vec<_>>().concat();
+    let flags: String = args
+        .iter()
+        .filter(|a| a.starts_with('-'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .concat();
     let recursive = flags.contains('r') || flags.contains('R');
     let force = flags.contains('f');
 
@@ -294,7 +305,10 @@ fn cp(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     let dst = resolve_path(non_flags[1], &ctx.env.cwd);
     match ctx.vfs.copy(&src, &dst) {
         Ok(()) => 0,
-        Err(e) => { io.write_err(&format!("cp: {}\n", e)); 1 }
+        Err(e) => {
+            io.write_err(&format!("cp: {}\n", e));
+            1
+        }
     }
 }
 
@@ -308,7 +322,10 @@ fn mv(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     let dst = resolve_path(non_flags[1], &ctx.env.cwd);
     match ctx.vfs.rename(&src, &dst) {
         Ok(()) => 0,
-        Err(e) => { io.write_err(&format!("mv: {}\n", e)); 1 }
+        Err(e) => {
+            io.write_err(&format!("mv: {}\n", e));
+            1
+        }
     }
 }
 
@@ -317,7 +334,10 @@ fn mv(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
 fn grep(args: &[String], io: &mut ShellIo) -> i32 {
     let pattern = match args.first() {
         Some(p) => p.as_str(),
-        None => { io.write_err("grep: missing pattern\n"); return 1; }
+        None => {
+            io.write_err("grep: missing pattern\n");
+            return 1;
+        }
     };
     let input = io.stdin_str().to_string();
     let mut matched = false;
@@ -328,7 +348,11 @@ fn grep(args: &[String], io: &mut ShellIo) -> i32 {
             matched = true;
         }
     }
-    if matched { 0 } else { 1 }
+    if matched {
+        0
+    } else {
+        1
+    }
 }
 
 fn head(args: &[String], io: &mut ShellIo) -> i32 {
@@ -366,9 +390,15 @@ fn wc(args: &[String], io: &mut ShellIo) -> i32 {
         io.write_out(&format!("{} {} {}\n", lines, words, chars));
     } else {
         let mut parts = Vec::new();
-        if count_lines { parts.push(lines.to_string()); }
-        if count_words { parts.push(words.to_string()); }
-        if count_chars { parts.push(chars.to_string()); }
+        if count_lines {
+            parts.push(lines.to_string());
+        }
+        if count_words {
+            parts.push(words.to_string());
+        }
+        if count_chars {
+            parts.push(chars.to_string());
+        }
         io.write_out(&parts.join(" "));
         io.write_out("\n");
     }
@@ -380,7 +410,9 @@ fn sort_builtin(args: &[String], io: &mut ShellIo) -> i32 {
     let input = io.stdin_str().to_string();
     let mut lines: Vec<&str> = input.lines().collect();
     lines.sort_unstable();
-    if reverse { lines.reverse(); }
+    if reverse {
+        lines.reverse();
+    }
     for line in lines {
         io.write_out(line);
         io.write_out("\n");
@@ -409,23 +441,28 @@ fn tr(args: &[String], io: &mut ShellIo) -> i32 {
     let from: Vec<char> = args[0].chars().collect();
     let to: Vec<char> = args[1].chars().collect();
     let input = io.stdin_str().to_string();
-    let out: String = input.chars().map(|c| {
-        if let Some(pos) = from.iter().position(|&f| f == c) {
-            *to.get(pos).unwrap_or(&c)
-        } else {
-            c
-        }
-    }).collect();
+    let out: String = input
+        .chars()
+        .map(|c| {
+            if let Some(pos) = from.iter().position(|&f| f == c) {
+                *to.get(pos).unwrap_or(&c)
+            } else {
+                c
+            }
+        })
+        .collect();
     io.write_out(&out);
     0
 }
 
 fn cut(args: &[String], io: &mut ShellIo) -> i32 {
-    let delim = args.windows(2)
+    let delim = args
+        .windows(2)
         .find(|w| w[0] == "-d")
         .and_then(|w| w[1].chars().next())
         .unwrap_or('\t');
-    let field = args.windows(2)
+    let field = args
+        .windows(2)
         .find(|w| w[0] == "-f")
         .and_then(|w| w[1].parse::<usize>().ok())
         .unwrap_or(1);

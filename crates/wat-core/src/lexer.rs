@@ -102,43 +102,70 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 i += 1;
             }
             '\n' => {
-                tokens.push(Spanned { token: Token::Newline, offset });
+                tokens.push(Spanned {
+                    token: Token::Newline,
+                    offset,
+                });
                 i += 1;
             }
             '|' => {
                 if i + 1 < chars.len() && chars[i + 1] == '|' {
-                    tokens.push(Spanned { token: Token::Or, offset });
+                    tokens.push(Spanned {
+                        token: Token::Or,
+                        offset,
+                    });
                     i += 2;
                 } else {
-                    tokens.push(Spanned { token: Token::Pipe, offset });
+                    tokens.push(Spanned {
+                        token: Token::Pipe,
+                        offset,
+                    });
                     i += 1;
                 }
             }
             '&' => {
                 if i + 1 < chars.len() && chars[i + 1] == '&' {
-                    tokens.push(Spanned { token: Token::And, offset });
+                    tokens.push(Spanned {
+                        token: Token::And,
+                        offset,
+                    });
                     i += 2;
                 } else {
                     // Lone `&` — treat as word for now (background jobs not supported)
-                    tokens.push(Spanned { token: Token::Word("&".to_string()), offset });
+                    tokens.push(Spanned {
+                        token: Token::Word("&".to_string()),
+                        offset,
+                    });
                     i += 1;
                 }
             }
             '>' => {
                 if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    tokens.push(Spanned { token: Token::RedirectAppend, offset });
+                    tokens.push(Spanned {
+                        token: Token::RedirectAppend,
+                        offset,
+                    });
                     i += 2;
                 } else {
-                    tokens.push(Spanned { token: Token::RedirectOut, offset });
+                    tokens.push(Spanned {
+                        token: Token::RedirectOut,
+                        offset,
+                    });
                     i += 1;
                 }
             }
             '<' => {
-                tokens.push(Spanned { token: Token::RedirectIn, offset });
+                tokens.push(Spanned {
+                    token: Token::RedirectIn,
+                    offset,
+                });
                 i += 1;
             }
             ';' => {
-                tokens.push(Spanned { token: Token::Semicolon, offset });
+                tokens.push(Spanned {
+                    token: Token::Semicolon,
+                    offset,
+                });
                 i += 1;
             }
             '#' => {
@@ -163,7 +190,10 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     });
                 }
                 i += 1; // consume closing '
-                tokens.push(Spanned { token: Token::Word(s), offset });
+                tokens.push(Spanned {
+                    token: Token::Word(s),
+                    offset,
+                });
             }
             '"' => {
                 // Double-quoted: allow backslash escapes, defer $ expansion
@@ -197,7 +227,10 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     });
                 }
                 i += 1; // consume closing "
-                tokens.push(Spanned { token: Token::Word(s), offset });
+                tokens.push(Spanned {
+                    token: Token::Word(s),
+                    offset,
+                });
             }
             '\\' => {
                 // Backslash outside quotes: escape next character
@@ -209,7 +242,10 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     let mut s = String::new();
                     s.push(escaped);
                     s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens);
-                    tokens.push(Spanned { token: Token::Word(s), offset });
+                    tokens.push(Spanned {
+                        token: Token::Word(s),
+                        offset,
+                    });
                 } else {
                     return Err(LexError {
                         message: "trailing backslash".to_string(),
@@ -220,10 +256,16 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
             // `2>` and `2>>` stderr redirects (only when 2 is immediately followed by >)
             '2' if i + 1 < chars.len() && chars[i + 1] == '>' => {
                 if i + 2 < chars.len() && chars[i + 2] == '>' {
-                    tokens.push(Spanned { token: Token::Redirect2Append, offset });
+                    tokens.push(Spanned {
+                        token: Token::Redirect2Append,
+                        offset,
+                    });
                     i += 3;
                 } else {
-                    tokens.push(Spanned { token: Token::Redirect2Out, offset });
+                    tokens.push(Spanned {
+                        token: Token::Redirect2Out,
+                        offset,
+                    });
                     i += 2;
                 }
             }
@@ -233,12 +275,18 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 s.push(c);
                 i += 1;
                 s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens);
-                tokens.push(Spanned { token: Token::Word(s), offset });
+                tokens.push(Spanned {
+                    token: Token::Word(s),
+                    offset,
+                });
             }
         }
     }
 
-    tokens.push(Spanned { token: Token::Eof, offset: input.len() });
+    tokens.push(Spanned {
+        token: Token::Eof,
+        offset: input.len(),
+    });
     Ok(tokens)
 }
 
@@ -327,7 +375,12 @@ mod tests {
     fn pipe() {
         assert_eq!(
             tokens("a | b"),
-            vec![Token::Word("a".into()), Token::Pipe, Token::Word("b".into()), Token::Eof]
+            vec![
+                Token::Word("a".into()),
+                Token::Pipe,
+                Token::Word("b".into()),
+                Token::Eof
+            ]
         );
     }
 
@@ -367,13 +420,21 @@ mod tests {
     fn semicolon() {
         assert_eq!(
             tokens("a ; b"),
-            vec![Token::Word("a".into()), Token::Semicolon, Token::Word("b".into()), Token::Eof]
+            vec![
+                Token::Word("a".into()),
+                Token::Semicolon,
+                Token::Word("b".into()),
+                Token::Eof
+            ]
         );
     }
 
     #[test]
     fn single_quoted() {
-        assert_eq!(tokens("'hello world'"), vec![Token::Word("hello world".into()), Token::Eof]);
+        assert_eq!(
+            tokens("'hello world'"),
+            vec![Token::Word("hello world".into()), Token::Eof]
+        );
     }
 
     #[test]
@@ -386,7 +447,10 @@ mod tests {
 
     #[test]
     fn double_quoted_escape() {
-        assert_eq!(tokens(r#""a\"b""#), vec![Token::Word(r#"a"b"#.into()), Token::Eof]);
+        assert_eq!(
+            tokens(r#""a\"b""#),
+            vec![Token::Word(r#"a"b"#.into()), Token::Eof]
+        );
     }
 
     #[test]
@@ -404,39 +468,48 @@ mod tests {
 
     #[test]
     fn comment_skipped() {
-        assert_eq!(tokens("echo hi # ignored"), vec![
-            Token::Word("echo".into()),
-            Token::Word("hi".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens("echo hi # ignored"),
+            vec![
+                Token::Word("echo".into()),
+                Token::Word("hi".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn newline_token() {
-        assert_eq!(tokens("a\nb"), vec![
-            Token::Word("a".into()),
-            Token::Newline,
-            Token::Word("b".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens("a\nb"),
+            vec![
+                Token::Word("a".into()),
+                Token::Newline,
+                Token::Word("b".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn full_pipeline_example() {
         let toks = tokens(r#"echo "hello world" | grep h > out.txt && cat out.txt"#);
-        assert_eq!(toks, vec![
-            Token::Word("echo".into()),
-            Token::Word("hello world".into()),
-            Token::Pipe,
-            Token::Word("grep".into()),
-            Token::Word("h".into()),
-            Token::RedirectOut,
-            Token::Word("out.txt".into()),
-            Token::And,
-            Token::Word("cat".into()),
-            Token::Word("out.txt".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            toks,
+            vec![
+                Token::Word("echo".into()),
+                Token::Word("hello world".into()),
+                Token::Pipe,
+                Token::Word("grep".into()),
+                Token::Word("h".into()),
+                Token::RedirectOut,
+                Token::Word("out.txt".into()),
+                Token::And,
+                Token::Word("cat".into()),
+                Token::Word("out.txt".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
