@@ -202,7 +202,7 @@ fn cat(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     if file_args.is_empty() {
         // cat with no args: copy stdin to stdout
         let data = io.stdin.to_vec();
-        io.stdout.extend_from_slice(&data);
+        io.write_out_bytes(&data);
         return 0;
     }
     let mut code = 0;
@@ -210,7 +210,7 @@ fn cat(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
         let path = resolve_path(arg, &ctx.env.cwd);
         match ctx.vfs.read(&path) {
             Ok(content) => {
-                io.stdout.extend_from_slice(&content);
+                io.write_out_bytes(&content);
             }
             Err(e) => {
                 io.write_err(&format!("cat: {}\n", e));
