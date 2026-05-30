@@ -4,6 +4,8 @@ use crate::eval::{eval, eval_streaming};
 use crate::io::{OutputSink, VecSink};
 use crate::parser::parse;
 use crate::process::ProcessHost;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 pub struct Shell {
     pub ctx: Context,
@@ -31,6 +33,15 @@ impl Shell {
     pub fn with_process_host(mut self, host: Box<dyn ProcessHost>) -> Self {
         self.ctx.process_host = host;
         self
+    }
+
+    /// Hand back the shared cancel flag so the caller (e.g. the native CLI)
+    /// can install a SIGINT handler that flips it. While the pipeline is
+    /// running, the executor polls this flag and forwards
+    /// `Signal::Interrupt` to the foreground child. Callers should reset it
+    /// to `false` after handling a cancellation.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.ctx.cancel.clone()
     }
 
     pub fn prompt(&self) -> String {

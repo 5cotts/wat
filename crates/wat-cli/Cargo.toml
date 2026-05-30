@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 wat-core = { path = "../wat-core", features = ["native-fs", "native-proc"] }
+signal-hook = "0.3"

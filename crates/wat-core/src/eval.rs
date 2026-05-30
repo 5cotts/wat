@@ -101,6 +101,8 @@ fn eval_pipeline_chained(
     // the very end, after the pipeline has fully wound down.
     #[cfg(feature = "native-proc")]
     let mut pending_stderr_handles: Vec<std::thread::JoinHandle<Vec<u8>>> = Vec::new();
+    #[cfg(feature = "native-proc")]
+    let cancel_flag = ctx.cancel.clone();
 
     for (idx, cmd) in pipeline.0.iter().enumerate() {
         let is_last = idx + 1 == n;
@@ -257,7 +259,7 @@ fn eval_pipeline_chained(
                     } else {
                         final_err
                     };
-                    stream_child(&mut *child, out_target, err_target)
+                    stream_child(&mut *child, out_target, err_target, &cancel_flag)
                 };
                 apply_output_redirects(cmd, ctx, local_out.as_slice(), local_err.as_slice());
                 last_code = code;
@@ -477,8 +479,9 @@ fn run_one(
             } else {
                 ChildStdin::Bytes(stdin_bytes.to_vec())
             };
+            let cancel = ctx.cancel.clone();
             return match ctx.process_host.spawn(spec, stdin) {
-                Ok(mut child) => stream_child(&mut *child, out_sink, err_sink),
+                Ok(mut child) => stream_child(&mut *child, out_sink, err_sink, &cancel),
                 Err(ProcessError::Unsupported) => {
                     let msg = format!("wat: command not found: {}\n", name);
                     err_sink.write(msg.as_bytes());
@@ -516,9 +519,12 @@ fn stream_child(
     child: &mut dyn crate::process::ChildProcess,
     out_sink: &mut dyn OutputSink,
     err_sink: &mut dyn OutputSink,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> i32 {
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     enum Msg {
         Out(Vec<u8>),
@@ -577,13 +583,24 @@ fn stream_child(
 
     let mut done_out = false;
     let mut done_err = false;
+    let mut signaled = false;
     while !(done_out && done_err) {
-        match rx.recv() {
+        match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Msg::Out(b)) => out_sink.write(&b),
             Ok(Msg::Err(b)) => err_sink.write(&b),
             Ok(Msg::OutDone) => done_out = true,
             Ok(Msg::ErrDone) => done_err = true,
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // No data right now — poll the cancel flag. If the user hit
+                // Ctrl-C, forward SIGINT to the child and keep draining
+                // until its pipes close. Only signal once per pipeline so we
+                // don't spam the child if it's slow to die.
+                if !signaled && cancel.load(Ordering::Relaxed) {
+                    let _ = child.signal(crate::process::Signal::Interrupt);
+                    signaled = true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
