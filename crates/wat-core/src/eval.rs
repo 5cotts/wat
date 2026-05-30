@@ -5,6 +5,8 @@ use crate::context::Context;
 use crate::expand::expand_word;
 use crate::glob::glob_expand;
 use crate::io::{OutputSink, ShellIo, VecSink};
+#[cfg(feature = "native-proc")]
+use crate::process::{ChildStdin, ProcessError, ProcessSpec};
 
 /// Evaluate a parsed command list, streaming output into the supplied sinks
 /// as it is produced. Returns the exit code of the last pipeline.
@@ -146,18 +148,14 @@ fn run_command(
         } else {
             err_sink
         };
-        let mut io = ShellIo {
-            stdin: &stdin_bytes,
-            stdout: stdout_target,
-            stderr: stderr_target,
-        };
-        match run_builtin(&name, &args, ctx, &mut io) {
-            Some(c) => c,
-            None => {
-                io.write_err(&format!("wat: command not found: {}\n", name));
-                127
-            }
-        }
+        run_one(
+            &name,
+            &args,
+            ctx,
+            &stdin_bytes,
+            stdout_target,
+            stderr_target,
+        )
     };
 
     for redirect in &cmd.redirects {
@@ -181,4 +179,167 @@ fn run_command(
     }
 
     code
+}
+
+/// Try builtin first; if it doesn't match, ask the ProcessHost; if that
+/// doesn't resolve either, emit "command not found".
+fn run_one(
+    name: &str,
+    args: &[String],
+    ctx: &mut Context,
+    stdin_bytes: &[u8],
+    out_sink: &mut dyn OutputSink,
+    err_sink: &mut dyn OutputSink,
+) -> i32 {
+    {
+        let mut io = ShellIo {
+            stdin: stdin_bytes,
+            stdout: out_sink,
+            stderr: err_sink,
+        };
+        if let Some(code) = run_builtin(name, args, ctx, &mut io) {
+            return code;
+        }
+    }
+
+    // External execution path: only compiled in when `native-proc` is enabled.
+    // In the WASM build this whole block — including the threading machinery
+    // in `stream_child` — disappears, keeping the bundle small. The
+    // `NoopProcessHost` would refuse to spawn anyway, so the user-visible
+    // behavior is identical.
+    #[cfg(feature = "native-proc")]
+    {
+        if let Some(path) = ctx.process_host.lookup(name) {
+            let mut argv = Vec::with_capacity(args.len() + 1);
+            argv.push(path.to_string_lossy().into_owned());
+            argv.extend(args.iter().cloned());
+            let env: Vec<(String, String)> = ctx
+                .env
+                .vars()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let spec = ProcessSpec {
+                argv,
+                env,
+                cwd: std::path::PathBuf::from(&ctx.env.cwd),
+            };
+            let stdin = if stdin_bytes.is_empty() {
+                ChildStdin::Null
+            } else {
+                ChildStdin::Bytes(stdin_bytes.to_vec())
+            };
+            return match ctx.process_host.spawn(spec, stdin) {
+                Ok(mut child) => stream_child(&mut *child, out_sink, err_sink),
+                Err(ProcessError::Unsupported) => {
+                    let msg = format!("wat: command not found: {}\n", name);
+                    err_sink.write(msg.as_bytes());
+                    127
+                }
+                Err(ProcessError::Io(e)) => {
+                    let msg = format!("wat: {}: {}\n", name, e);
+                    err_sink.write(msg.as_bytes());
+                    126
+                }
+            };
+        }
+    }
+    #[cfg(not(feature = "native-proc"))]
+    {
+        let _ = (ctx, stdin_bytes, out_sink);
+    }
+
+    let msg = format!("wat: command not found: {}\n", name);
+    err_sink.write(msg.as_bytes());
+    127
+}
+
+/// Drain a running child's stdout/stderr into the supplied sinks until both
+/// pipes are at EOF, then wait for the child and return its exit code. Uses
+/// two reader threads + a tagged channel so the main thread can write the
+/// non-Send sinks while the pipes drain concurrently — no deadlock if the
+/// child writes a lot to stderr before flushing stdout.
+///
+/// Native-only: pulls in `std::thread` and `mpsc`, both of which inflate the
+/// WASM bundle when included (and `std::thread::spawn` panics under wasm32
+/// at runtime anyway).
+#[cfg(feature = "native-proc")]
+fn stream_child(
+    child: &mut dyn crate::process::ChildProcess,
+    out_sink: &mut dyn OutputSink,
+    err_sink: &mut dyn OutputSink,
+) -> i32 {
+    use std::sync::mpsc;
+    use std::thread;
+
+    enum Msg {
+        Out(Vec<u8>),
+        Err(Vec<u8>),
+        OutDone,
+        ErrDone,
+    }
+
+    let (tx, rx) = mpsc::channel::<Msg>();
+    let mut handles = Vec::new();
+
+    if let Some(mut stdout) = child.take_stdout() {
+        let tx = tx.clone();
+        handles.push(thread::spawn(move || {
+            use std::io::Read as _;
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(Msg::Out(buf[..n].to_vec())).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(Msg::OutDone);
+        }));
+    } else {
+        let _ = tx.send(Msg::OutDone);
+    }
+
+    if let Some(mut stderr) = child.take_stderr() {
+        let tx = tx.clone();
+        handles.push(thread::spawn(move || {
+            use std::io::Read as _;
+            let mut buf = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(Msg::Err(buf[..n].to_vec())).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(Msg::ErrDone);
+        }));
+    } else {
+        let _ = tx.send(Msg::ErrDone);
+    }
+    drop(tx);
+
+    let mut done_out = false;
+    let mut done_err = false;
+    while !(done_out && done_err) {
+        match rx.recv() {
+            Ok(Msg::Out(b)) => out_sink.write(&b),
+            Ok(Msg::Err(b)) => err_sink.write(&b),
+            Ok(Msg::OutDone) => done_out = true,
+            Ok(Msg::ErrDone) => done_err = true,
+            Err(_) => break,
+        }
+    }
+
+    for h in handles {
+        let _ = h.join();
+    }
+    child.wait().unwrap_or(1)
 }
