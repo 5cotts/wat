@@ -54,10 +54,10 @@ pub fn eval(list: &List, ctx: &mut Context) -> (i32, String) {
     (code, String::from_utf8_lossy(&combined).into_owned())
 }
 
-/// Run a pipeline, chaining stdout of each command to stdin of the next.
-/// Inner segments buffer their stdout into a `VecSink` so it can become the
-/// next segment's stdin. The final segment streams stdout into `final_out`.
-/// Stderr from every segment is forwarded to `final_err` as it is produced.
+/// Run a pipeline. Single-command pipelines go through the fast path that
+/// also handles redirects. Multi-command pipelines route through
+/// `eval_pipeline_chained`, which chains consecutive external segments via
+/// `ChildStdin::Pipe` so they stream without parent buffering.
 fn eval_pipeline(
     pipeline: &Pipeline,
     ctx: &mut Context,
@@ -65,26 +65,316 @@ fn eval_pipeline(
     final_out: &mut dyn OutputSink,
     final_err: &mut dyn OutputSink,
 ) -> i32 {
-    let cmds = &pipeline.0;
-    let mut stdin_data: Vec<u8> = initial_stdin.to_vec();
-    let mut last_code = 0i32;
+    if pipeline.0.len() == 1 {
+        return run_command(&pipeline.0[0], ctx, initial_stdin, final_out, final_err);
+    }
+    eval_pipeline_chained(pipeline, ctx, initial_stdin, final_out, final_err)
+}
 
-    for (idx, cmd) in cmds.iter().enumerate() {
-        let is_last = idx + 1 == cmds.len();
-        if is_last {
-            let code = run_command(cmd, ctx, &stdin_data, final_out, final_err);
-            ctx.env.last_exit_code = code;
-            last_code = code;
-        } else {
+/// Multi-segment pipeline executor. For each adjacent pair of external
+/// segments, the upstream's stdout is fed into the downstream's stdin via
+/// `ChildStdin::Pipe`, so the parent never buffers the whole stream.
+/// Builtins still go through the synchronous buffered path; at a
+/// builtin↔external boundary we materialize the buffer (builtin→external) or
+/// fully drain the upstream child (external→builtin).
+fn eval_pipeline_chained(
+    pipeline: &Pipeline,
+    ctx: &mut Context,
+    initial_stdin: &[u8],
+    final_out: &mut dyn OutputSink,
+    final_err: &mut dyn OutputSink,
+) -> i32 {
+    enum PipelineStdin {
+        Bytes(Vec<u8>),
+        #[cfg(feature = "native-proc")]
+        Reader(Box<dyn std::io::Read + Send>),
+    }
+
+    let n = pipeline.0.len();
+    let mut current: PipelineStdin = PipelineStdin::Bytes(initial_stdin.to_vec());
+    let mut last_code = 0i32;
+    #[cfg(feature = "native-proc")]
+    let mut pending_children: Vec<Box<dyn crate::process::ChildProcess>> = Vec::new();
+    // Background threads draining mid-pipeline stderrs into per-segment
+    // buffers. We can't pass `&mut dyn OutputSink` across threads (not Send),
+    // so each thread fills its own Vec and we flush them into `final_err` at
+    // the very end, after the pipeline has fully wound down.
+    #[cfg(feature = "native-proc")]
+    let mut pending_stderr_handles: Vec<std::thread::JoinHandle<Vec<u8>>> = Vec::new();
+
+    for (idx, cmd) in pipeline.0.iter().enumerate() {
+        let is_last = idx + 1 == n;
+
+        // Resolve name + args once; needed for both builtin lookup and
+        // external spawn.
+        let name = expand_word(&cmd.name, &ctx.env);
+        let args: Vec<String> = cmd
+            .args
+            .iter()
+            .flat_map(|a| {
+                let expanded = expand_word(a, &ctx.env);
+                glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
+            })
+            .collect();
+        let name = normalize_easter_egg(&name, &args);
+
+        let is_builtin = crate::builtins::is_builtin(&name);
+
+        if is_builtin {
+            // Builtins consume bytes; materialize a Reader if we have one.
+            let stdin_bytes = match current {
+                PipelineStdin::Bytes(b) => b,
+                #[cfg(feature = "native-proc")]
+                PipelineStdin::Reader(mut r) => {
+                    let mut b = Vec::new();
+                    use std::io::Read as _;
+                    let _ = r.read_to_end(&mut b);
+                    b
+                }
+            };
+            // Apply input redirect override if present.
+            let stdin_bytes = apply_input_redirect(cmd, ctx, stdin_bytes);
+            let has_out_redirect = cmd
+                .redirects
+                .iter()
+                .any(|r| matches!(r, Redirect::Out(_) | Redirect::Append(_)));
+            let has_err_redirect = cmd.redirects.iter().any(|r| matches!(r, Redirect::Err(_)));
+
+            let mut local_out = VecSink::new();
+            let mut local_err = VecSink::new();
             let mut buffered_out = VecSink::new();
-            let code = run_command(cmd, ctx, &stdin_data, &mut buffered_out, final_err);
-            ctx.env.last_exit_code = code;
+            let code = {
+                let stdout_target: &mut dyn OutputSink = if has_out_redirect {
+                    &mut local_out
+                } else if is_last {
+                    final_out
+                } else {
+                    &mut buffered_out
+                };
+                let stderr_target: &mut dyn OutputSink = if has_err_redirect {
+                    &mut local_err
+                } else {
+                    final_err
+                };
+                let mut io = ShellIo {
+                    stdin: &stdin_bytes,
+                    stdout: stdout_target,
+                    stderr: stderr_target,
+                };
+                run_builtin(&name, &args, ctx, &mut io).unwrap_or_else(|| {
+                    io.write_err(&format!("wat: command not found: {}\n", name));
+                    127
+                })
+            };
+            apply_output_redirects(cmd, ctx, local_out.as_slice(), local_err.as_slice());
             last_code = code;
-            stdin_data = buffered_out.into_inner();
+            ctx.env.last_exit_code = code;
+            current = PipelineStdin::Bytes(buffered_out.into_inner());
+            continue;
+        }
+
+        // External segment. Behavior depends on whether native-proc is
+        // compiled in.
+        #[cfg(feature = "native-proc")]
+        {
+            // Apply input redirect by materializing the reader to bytes.
+            let stdin = match current {
+                PipelineStdin::Bytes(b) => ChildStdin::Bytes(apply_input_redirect(cmd, ctx, b)),
+                PipelineStdin::Reader(r) => {
+                    if cmd.redirects.iter().any(|x| matches!(x, Redirect::In(_))) {
+                        // Input redirect overrides upstream pipe.
+                        ChildStdin::Bytes(apply_input_redirect(cmd, ctx, Vec::new()))
+                    } else {
+                        ChildStdin::Pipe(r)
+                    }
+                }
+            };
+            let has_out_redirect = cmd
+                .redirects
+                .iter()
+                .any(|r| matches!(r, Redirect::Out(_) | Redirect::Append(_)));
+            let has_err_redirect = cmd.redirects.iter().any(|r| matches!(r, Redirect::Err(_)));
+
+            let path = match ctx.process_host.lookup(&name) {
+                Some(p) => p,
+                None => {
+                    let msg = format!("wat: command not found: {}\n", name);
+                    final_err.write(msg.as_bytes());
+                    last_code = 127;
+                    ctx.env.last_exit_code = last_code;
+                    current = PipelineStdin::Bytes(Vec::new());
+                    continue;
+                }
+            };
+
+            let mut argv = Vec::with_capacity(args.len() + 1);
+            argv.push(path.to_string_lossy().into_owned());
+            argv.extend(args.iter().cloned());
+            let env: Vec<(String, String)> = ctx
+                .env
+                .vars()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let spec = ProcessSpec {
+                argv,
+                env,
+                cwd: std::path::PathBuf::from(&ctx.env.cwd),
+            };
+
+            let mut child = match ctx.process_host.spawn(spec, stdin) {
+                Ok(c) => c,
+                Err(ProcessError::Unsupported) => {
+                    let msg = format!("wat: command not found: {}\n", name);
+                    final_err.write(msg.as_bytes());
+                    last_code = 127;
+                    ctx.env.last_exit_code = last_code;
+                    current = PipelineStdin::Bytes(Vec::new());
+                    continue;
+                }
+                Err(ProcessError::Io(e)) => {
+                    let msg = format!("wat: {}: {}\n", name, e);
+                    final_err.write(msg.as_bytes());
+                    last_code = 126;
+                    ctx.env.last_exit_code = last_code;
+                    current = PipelineStdin::Bytes(Vec::new());
+                    continue;
+                }
+            };
+
+            if is_last {
+                // Drain to final_out/final_err (or to local sinks if
+                // redirected) and wait.
+                let mut local_out = VecSink::new();
+                let mut local_err = VecSink::new();
+                let code = {
+                    let out_target: &mut dyn OutputSink = if has_out_redirect {
+                        &mut local_out
+                    } else {
+                        final_out
+                    };
+                    let err_target: &mut dyn OutputSink = if has_err_redirect {
+                        &mut local_err
+                    } else {
+                        final_err
+                    };
+                    stream_child(&mut *child, out_target, err_target)
+                };
+                apply_output_redirects(cmd, ctx, local_out.as_slice(), local_err.as_slice());
+                last_code = code;
+                ctx.env.last_exit_code = code;
+                current = PipelineStdin::Bytes(Vec::new());
+            } else {
+                // Drain stderr in a background thread into a per-segment
+                // buffer; we flush these into `final_err` after the pipeline
+                // completes. This is critical: doing a synchronous
+                // `read_to_end` here would deadlock for producers like `yes`
+                // that never EOF until SIGPIPE'd by the downstream — which
+                // can't happen until we move on and spawn the downstream.
+                if let Some(mut stderr) = child.take_stderr() {
+                    pending_stderr_handles.push(std::thread::spawn(move || {
+                        use std::io::Read as _;
+                        let mut buf = Vec::new();
+                        let _ = stderr.read_to_end(&mut buf);
+                        buf
+                    }));
+                }
+                if has_out_redirect {
+                    // Drain stdout to bytes, write to file, current = empty.
+                    let mut buf = Vec::new();
+                    if let Some(mut stdout) = child.take_stdout() {
+                        use std::io::Read as _;
+                        let _ = stdout.read_to_end(&mut buf);
+                    }
+                    apply_output_redirects(cmd, ctx, &buf, &[]);
+                    current = PipelineStdin::Bytes(Vec::new());
+                    pending_children.push(child);
+                } else {
+                    let reader = child
+                        .take_stdout()
+                        .unwrap_or_else(|| Box::new(std::io::empty()));
+                    current = PipelineStdin::Reader(reader);
+                    pending_children.push(child);
+                }
+            }
+        }
+        #[cfg(not(feature = "native-proc"))]
+        {
+            // WASM / no-process build: any non-builtin in a pipeline behaves
+            // like POSIX with command-not-found — emit the error and pass
+            // empty bytes downstream.
+            let msg = format!("wat: command not found: {}\n", name);
+            final_err.write(msg.as_bytes());
+            last_code = 127;
+            ctx.env.last_exit_code = last_code;
+            current = PipelineStdin::Bytes(Vec::new());
+            // Touch `current` to silence the unused variant warning when not
+            // compiled with native-proc.
+            let _ = is_last;
+        }
+    }
+
+    // Reap any externals still alive (their stdout/stderr is already drained
+    // via the chain or via the background stderr thread).
+    #[cfg(feature = "native-proc")]
+    for mut c in pending_children {
+        let _ = c.wait();
+    }
+    // Now collect the background stderr buffers and flush them into the
+    // final sink in source order.
+    #[cfg(feature = "native-proc")]
+    for h in pending_stderr_handles {
+        if let Ok(buf) = h.join() {
+            if !buf.is_empty() {
+                final_err.write(&buf);
+            }
         }
     }
 
     last_code
+}
+
+fn apply_input_redirect(cmd: &Command, ctx: &Context, fallback: Vec<u8>) -> Vec<u8> {
+    cmd.redirects
+        .iter()
+        .find_map(|r| {
+            if let Redirect::In(path) = r {
+                let full = resolve_path(path, &ctx.env.cwd);
+                ctx.vfs.read(&full).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(fallback)
+}
+
+fn apply_output_redirects(cmd: &Command, ctx: &mut Context, out_bytes: &[u8], err_bytes: &[u8]) {
+    for redirect in &cmd.redirects {
+        match redirect {
+            Redirect::Out(path) => {
+                let full = resolve_path(path, &ctx.env.cwd);
+                let _ = ctx.vfs.write(&full, out_bytes);
+            }
+            Redirect::Append(path) => {
+                let full = resolve_path(path, &ctx.env.cwd);
+                let mut existing = ctx.vfs.read(&full).unwrap_or_default();
+                existing.extend_from_slice(out_bytes);
+                let _ = ctx.vfs.write(&full, &existing);
+            }
+            Redirect::Err(path) => {
+                let full = resolve_path(path, &ctx.env.cwd);
+                let _ = ctx.vfs.write(&full, err_bytes);
+            }
+            Redirect::In(_) => {}
+        }
+    }
+}
+
+fn normalize_easter_egg(name: &str, args: &[String]) -> String {
+    if (name == "bash" || name == "sh") && args.first().map(|s| s.as_str()) == Some("whoami.sh") {
+        "bash whoami.sh".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Run a single command, handling redirects and writing output to the supplied
@@ -107,26 +397,9 @@ fn run_command(
         })
         .collect();
 
-    let name = if (name == "bash" || name == "sh")
-        && args.first().map(|s| s.as_str()) == Some("whoami.sh")
-    {
-        "bash whoami.sh".to_string()
-    } else {
-        name
-    };
+    let name = normalize_easter_egg(&name, &args);
 
-    let stdin_bytes: Vec<u8> = cmd
-        .redirects
-        .iter()
-        .find_map(|r| {
-            if let Redirect::In(path) = r {
-                let full = resolve_path(path, &ctx.env.cwd);
-                ctx.vfs.read(&full).ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| stdin_data.to_vec());
+    let stdin_bytes = apply_input_redirect(cmd, ctx, stdin_data.to_vec());
 
     let has_out_redirect = cmd
         .redirects
@@ -158,26 +431,7 @@ fn run_command(
         )
     };
 
-    for redirect in &cmd.redirects {
-        match redirect {
-            Redirect::Out(path) => {
-                let full = resolve_path(path, &ctx.env.cwd);
-                let _ = ctx.vfs.write(&full, local_out.as_slice());
-            }
-            Redirect::Append(path) => {
-                let full = resolve_path(path, &ctx.env.cwd);
-                let mut existing = ctx.vfs.read(&full).unwrap_or_default();
-                existing.extend_from_slice(local_out.as_slice());
-                let _ = ctx.vfs.write(&full, &existing);
-            }
-            Redirect::Err(path) => {
-                let full = resolve_path(path, &ctx.env.cwd);
-                let _ = ctx.vfs.write(&full, local_err.as_slice());
-            }
-            Redirect::In(_) => {}
-        }
-    }
-
+    apply_output_redirects(cmd, ctx, local_out.as_slice(), local_err.as_slice());
     code
 }
 
@@ -202,11 +456,6 @@ fn run_one(
         }
     }
 
-    // External execution path: only compiled in when `native-proc` is enabled.
-    // In the WASM build this whole block — including the threading machinery
-    // in `stream_child` — disappears, keeping the bundle small. The
-    // `NoopProcessHost` would refuse to spawn anyway, so the user-visible
-    // behavior is identical.
     #[cfg(feature = "native-proc")]
     {
         if let Some(path) = ctx.process_host.lookup(name) {

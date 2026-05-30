@@ -54,6 +54,52 @@ pub fn run_builtin<'a>(
     }
 }
 
+/// Returns true if `name` resolves to a wat builtin. Used by the pipeline
+/// executor to decide between the synchronous builtin path and the
+/// process-spawning external path.
+pub fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "echo"
+            | "pwd"
+            | "cd"
+            | "exit"
+            | "env"
+            | "export"
+            | "unset"
+            | "help"
+            | "clear"
+            | "true"
+            | "false"
+            | "ls"
+            | "cat"
+            | "mkdir"
+            | "touch"
+            | "rm"
+            | "cp"
+            | "mv"
+            | "grep"
+            | "head"
+            | "tail"
+            | "wc"
+            | "sort"
+            | "uniq"
+            | "tr"
+            | "cut"
+            | "history"
+            | "sudo"
+            | "vim"
+            | "vi"
+            | "nano"
+            | "emacs"
+            | "sl"
+            | "./whoami.sh"
+            | "bash whoami.sh"
+            | "sh whoami.sh"
+            | "__konami__"
+    )
+}
+
 fn history_builtin(ctx: &Context, io: &mut ShellIo) -> i32 {
     for (i, cmd) in ctx.history.iter().enumerate() {
         io.write_out(&format!("{:4}  {}\n", i + 1, cmd));
