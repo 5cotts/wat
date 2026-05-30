@@ -54,6 +54,90 @@ impl Shell {
         self
     }
 
+    /// Parse `input`, resolve the leading command, and spawn it inside a
+    /// PTY. Returns the running child to the caller, who is responsible
+    /// for shuttling bytes between the user's terminal and the master
+    /// pipe and for calling `wait()`. Used only by the native CLI's
+    /// interactive path; tests and scripts go through `feed_streaming`.
+    ///
+    /// Returns `ProcessError::Unsupported` if no `PtyHost` is installed,
+    /// if the input doesn't parse to a single-command pipeline with no
+    /// redirects, or if the command name isn't found on PATH.
+    #[cfg(feature = "native-pty")]
+    pub fn spawn_pty(
+        &mut self,
+        input: &str,
+        dims: crate::pty::PtyDims,
+    ) -> Result<Box<dyn crate::pty::PtyChild>, crate::process::ProcessError> {
+        use crate::expand::expand_word;
+        use crate::glob::glob_expand;
+        use crate::process::{ProcessError, ProcessSpec};
+
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(ProcessError::Unsupported);
+        }
+        self.ctx.history.push(input);
+
+        let list = parse(input).map_err(|_| ProcessError::Unsupported)?;
+        if list.0.len() != 1 {
+            return Err(ProcessError::Unsupported);
+        }
+        let (pipeline, _) = &list.0[0];
+        if pipeline.0.len() != 1 {
+            return Err(ProcessError::Unsupported);
+        }
+        let cmd = &pipeline.0[0];
+        if !cmd.redirects.is_empty() {
+            return Err(ProcessError::Unsupported);
+        }
+
+        let name = expand_word(&cmd.name, &self.ctx.env);
+        let args: Vec<String> = cmd
+            .args
+            .iter()
+            .flat_map(|a| {
+                let expanded = expand_word(a, &self.ctx.env);
+                glob_expand(&expanded, self.ctx.vfs.as_ref(), &self.ctx.env.cwd)
+            })
+            .collect();
+
+        let path = self
+            .ctx
+            .process_host
+            .lookup(&name)
+            .ok_or(ProcessError::Unsupported)?;
+
+        let mut argv = Vec::with_capacity(args.len() + 1);
+        argv.push(path.to_string_lossy().into_owned());
+        argv.extend(args);
+        let env: Vec<(String, String)> = self
+            .ctx
+            .env
+            .vars()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let spec = ProcessSpec {
+            argv,
+            env,
+            cwd: std::path::PathBuf::from(&self.ctx.env.cwd),
+        };
+
+        let host = self
+            .ctx
+            .pty_host
+            .as_ref()
+            .ok_or(ProcessError::Unsupported)?;
+        host.spawn_pty(spec, dims)
+    }
+
+    /// After a PTY child exits, store its exit code in `$?` so subsequent
+    /// commands can reference it.
+    #[cfg(feature = "native-pty")]
+    pub fn set_last_exit_code(&mut self, code: i32) {
+        self.ctx.env.last_exit_code = code;
+    }
+
     pub fn prompt(&self) -> String {
         format!("5cotts@zo {} % ", self.ctx.env.prompt_cwd())
     }
