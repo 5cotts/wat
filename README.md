@@ -4,6 +4,12 @@ A POSIX-flavored shell written in Rust that runs natively and compiles to WebAss
 
 **Live site:** https://zo.pub/5cotts/wat
 
+The native CLI (`wat-cli`) can run real external programs (`git`, `ls`,
+`cargo`, anything on `PATH`) with live-streaming output and Ctrl-C
+cancellation. It is **not** a login-shell replacement — see
+[Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
+for the explicit non-goals.
+
 ## First-time setup
 
 All tooling is scoped to this directory — nothing is installed globally.
@@ -64,9 +70,9 @@ hosts [xterm.js](https://xtermjs.org) and forwards keystrokes into the WASM modu
 ```mermaid
 flowchart TB
   subgraph Rust["Rust workspace (cargo)"]
-    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval<br/>builtins · vfs · io"]
-    cli["<b>wat-cli</b> (bin)<br/>native REPL"]
-    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell"]
+    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval · builtins<br/>Vfs trait · ProcessHost trait · io"]
+    cli["<b>wat-cli</b> (bin)<br/>native REPL<br/>NativeVfs + NativeProcessHost<br/>signal-hook SIGINT handler"]
+    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell<br/>MemoryVfs + NoopProcessHost"]
     core --> cli
     core --> wasm
   end
@@ -166,8 +172,9 @@ sequenceDiagram
 | `crates/wat-core/src/glob.rs` | Pattern matching for `*` / `?`. |
 | `crates/wat-core/src/complete.rs` | Tab-completion candidates. |
 | `crates/wat-core/src/history.rs` | Command history (powers ↑/↓). |
-| `crates/wat-core/src/io.rs` | `ShellIo` buffers + `emit_side_effect()` (writes `OSC 9999;{json}\x07`). |
-| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. |
+| `crates/wat-core/src/io.rs` | `OutputSink` trait, `ShellIo` buffers + `emit_side_effect()` (writes `OSC 9999;{json}\x07`). |
+| `crates/wat-core/src/process.rs` | `ProcessHost` / `ChildProcess` / `Signal` traits; `NativeProcessHost` (gated on `native-proc`) and `NoopProcessHost` (default, WASM). |
+| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. `cancel_flag()` exposes the SIGINT atomic. |
 | `crates/wat-wasm/src/lib.rs` | `#[wasm_bindgen]` wrapper exposing `Shell::new/prompt/feed/complete/history_at` to JS. |
 | `crates/wat-cli/src/main.rs` | Native REPL (not used in browser). |
 | `web/index.html` | DOM scaffold: window chrome, `#terminal` mount, loader. |
@@ -196,6 +203,36 @@ output stream and turns them into real browser actions:
 
 This keeps `wat-core` pure Rust and host-agnostic — the same shell that runs in the
 browser also runs in `wat-cli`, which simply ignores any `OSC 9999` it might emit.
+
+## Use as a scratch shell on macOS
+
+`wat-cli` can run real external programs, stream their output live, and
+honor Ctrl-C. After `just build-native`, drop the binary somewhere on
+your `PATH`:
+
+```sh
+just install-mac   # copies target/release/wat → ~/.local/bin/wat
+```
+
+Then `wat` from your terminal gets you a REPL where `git status`, `ls -la
+| grep something | wc -l`, `cargo build`, and `sleep 30` + Ctrl-C all
+work as expected.
+
+**Do not make this your login shell.** Tier 1 explicitly does *not*
+implement:
+
+- **PTY / raw-mode apps.** `vim`, `less`, `htop`, `top`, anything that
+  draws on the screen, will not work — they need a real PTY and that's
+  Tier 2.
+- **Job control.** No `Ctrl-Z`, no `&`, no `bg` / `fg` / `jobs`. Once a
+  command starts, it runs in the foreground until it exits or you
+  interrupt it. That's Tier 3.
+- **Startup files, aliases, completion for external commands, here-docs,
+  functions, arrays, arithmetic expansion, `set -o` flags.** Not in
+  scope.
+
+Treat it as a credible *scratch* shell — fun to drive on purpose, not a
+replacement for `zsh`.
 
 ## Adding a builtin
 
