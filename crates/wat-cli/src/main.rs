@@ -1,11 +1,15 @@
-use std::io::{self, BufRead, Write};
+use is_terminal::IsTerminal;
+use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::Ordering;
 use wat_core::io::{StderrSink, StdoutSink};
 use wat_core::process::NativeProcessHost;
+use wat_core::pty::{NativePtyHost, PtyDims};
 use wat_core::Shell;
 
 fn main() {
-    let mut shell = Shell::new().with_process_host(Box::new(NativeProcessHost));
+    let mut shell = Shell::new()
+        .with_process_host(Box::new(NativeProcessHost))
+        .with_pty_host(Box::new(NativePtyHost));
 
     // The default shell env points at the in-memory VFS layout (/home/5cotts).
     // In native mode we want to land on the host's actual cwd so spawned
@@ -38,6 +42,7 @@ fn main() {
 
     let stdin = io::stdin();
     let stdout = io::stdout();
+    let stdin_is_tty = io::stdin().is_terminal();
 
     print!("{}", shell.prompt());
     stdout.lock().flush().unwrap();
@@ -48,18 +53,28 @@ fn main() {
         // that arrived during the previous prompt-read doesn't immediately
         // cancel the next command.
         cancel.store(false, Ordering::Relaxed);
-        // Stream stdout/stderr directly to the terminal as the command
-        // produces them — long-running externals (e.g. `cargo build`) show
-        // progress live instead of dumping everything at the end.
-        let mut out = StdoutSink;
-        let mut err = StderrSink;
-        shell.feed_streaming(&line, &mut out, &mut err);
-        if cancel.swap(false, Ordering::Relaxed) {
-            // Mimic bash/zsh: print the visible Ctrl-C marker so the user
-            // can see why the command stopped. The line buffer is already
-            // empty (we just consumed `line`) so there's nothing extra to
-            // clear.
-            println!("^C");
+
+        // PTY path for interactive foreground commands when our stdin is
+        // a real TTY. Phase B uses a small allowlist; Phase D replaces it
+        // with the full routing rule (single-command pipeline, no
+        // redirects, not a builtin, on PATH).
+        if stdin_is_tty && pty_eligible(&line) {
+            let exit = run_in_pty(&mut shell, &line);
+            shell.set_last_exit_code(exit);
+        } else {
+            // Stream stdout/stderr directly to the terminal as the command
+            // produces them — long-running externals (e.g. `cargo build`)
+            // show progress live instead of dumping everything at the end.
+            let mut out = StdoutSink;
+            let mut err = StderrSink;
+            shell.feed_streaming(&line, &mut out, &mut err);
+            if cancel.swap(false, Ordering::Relaxed) {
+                // Mimic bash/zsh: print the visible Ctrl-C marker so the
+                // user can see why the command stopped. The line buffer is
+                // already empty (we just consumed `line`) so there's
+                // nothing extra to clear.
+                println!("^C");
+            }
         }
         if shell.exit_requested {
             std::process::exit(shell.last_exit_code());
@@ -67,4 +82,125 @@ fn main() {
         print!("{}", shell.prompt());
         stdout.lock().flush().unwrap();
     }
+}
+
+/// Phase B routing: a tiny allowlist of programs that we know want a real
+/// terminal. Phase D replaces this with the full parse-tree-aware check
+/// `Shell::pty_eligible`. We also reject anything that has operators that
+/// would force the piped path (`|`, `>`, `<`, `;`, `&&`, `||`) so a
+/// pipeline of one of the allowed names still goes through `feed_streaming`.
+fn pty_eligible(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.contains('|')
+        || trimmed.contains('>')
+        || trimmed.contains('<')
+        || trimmed.contains(';')
+        || trimmed.contains("&&")
+        || trimmed.contains("||")
+    {
+        return false;
+    }
+    let first = trimmed.split_whitespace().next().unwrap_or("");
+    matches!(
+        first,
+        "vim"
+            | "vi"
+            | "nano"
+            | "less"
+            | "more"
+            | "htop"
+            | "top"
+            | "man"
+            | "ssh"
+            | "python"
+            | "python3"
+            | "node"
+            | "irb"
+    )
+}
+
+/// RAII guard around `crossterm::terminal::enable_raw_mode`. Drop restores
+/// cooked mode on every exit path — normal return, panic, early `?`. The
+/// CLI MUST go through this guard; manual `enable` / `disable` pairs are
+/// too easy to leak on a panic.
+struct RawModeGuard;
+impl RawModeGuard {
+    fn enter() -> io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Drive a PTY-spawned child. Allocates a PTY at the current terminal
+/// size, enters raw mode, copies bytes both directions until the child
+/// exits, then restores cooked mode (via the guard's `Drop`) before
+/// returning the exit code.
+///
+/// Returns 127 if the command can't be resolved or spawned. The stdin
+/// reader thread is intentionally detached — it may be parked in a
+/// blocking `read` on stdin even after the child exits, and joining
+/// would hang the REPL until the user pressed a key. Leaking it per
+/// command is acceptable for Tier 2; Tier 3 will revisit.
+fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let dims = PtyDims { rows, cols };
+    let mut child = match shell.spawn_pty(input, dims) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wat: {}", e);
+            return 127;
+        }
+    };
+    let mut reader = child.master_reader().expect("master reader");
+    let mut writer = child.master_writer().expect("master writer");
+
+    let _guard = match RawModeGuard::enter() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("wat: enter raw mode: {}", e);
+            return 1;
+        }
+    };
+
+    // stdin → master, in a detached thread.
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut stdin = stdin.lock();
+        let mut buf = [0u8; 1024];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if writer.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = writer.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // master → stdout on this thread; we exit promptly when the master
+    // EOFs (which happens when the child closes its slave FDs on exit).
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let _ = stdout.write_all(&buf[..n]);
+                let _ = stdout.flush();
+            }
+            Err(_) => break,
+        }
+    }
+
+    child.wait().unwrap_or(1)
 }
