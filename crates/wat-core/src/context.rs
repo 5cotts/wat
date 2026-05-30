@@ -18,6 +18,12 @@ pub struct Context {
     /// foreground child. WASM never flips this, so the flag is harmless
     /// dead-weight there.
     pub cancel: Arc<AtomicBool>,
+    /// Optional PTY host for interactive foreground commands. The native
+    /// CLI installs `NativePtyHost` here; everything else (WASM, tests
+    /// that don't need a PTY, non-interactive callers) leaves it `None`
+    /// and falls back to the piped `ProcessHost` path.
+    #[cfg(feature = "native-pty")]
+    pub pty_host: Option<Box<dyn crate::pty::PtyHost>>,
 }
 
 impl Context {
@@ -33,6 +39,8 @@ impl Context {
             history: History::new(100),
             process_host: Box::new(NoopProcessHost),
             cancel: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "native-pty")]
+            pty_host: None,
         }
     }
 
@@ -44,6 +52,8 @@ impl Context {
             history: History::new(100),
             process_host: Box::new(NoopProcessHost),
             cancel: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "native-pty")]
+            pty_host: None,
         }
     }
 }

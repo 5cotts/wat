@@ -8,5 +8,5 @@ name = "wat"
 path = "src/main.rs"
 
 [dependencies]
-wat-core = { path = "../wat-core", features = ["native-fs", "native-proc"] }
+wat-core = { path = "../wat-core", features = ["native-fs", "native-proc", "native-pty"] }
 signal-hook = "0.3"
