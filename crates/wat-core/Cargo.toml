@@ -10,8 +10,10 @@ crate-type = ["rlib"]
 default = []
 native-fs = []
 native-proc = []
+native-pty = ["dep:portable-pty"]
 
 [dependencies]
+portable-pty = { version = "0.8", optional = true }
 
 [dev-dependencies]
 insta = "1"

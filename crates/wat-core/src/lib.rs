@@ -11,6 +11,8 @@ pub mod io;
 pub mod lexer;
 pub mod parser;
 pub mod process;
+#[cfg(feature = "native-pty")]
+pub mod pty;
 pub mod shell;
 pub mod vfs;
 

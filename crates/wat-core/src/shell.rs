@@ -44,6 +44,16 @@ impl Shell {
         self.ctx.cancel.clone()
     }
 
+    /// Install a PTY host so the native CLI can spawn interactive
+    /// foreground commands (`vim`, `less`, ...) inside a real pseudo-
+    /// terminal. WASM never calls this; the WASM build doesn't even
+    /// compile the `pty` module.
+    #[cfg(feature = "native-pty")]
+    pub fn with_pty_host(mut self, host: Box<dyn crate::pty::PtyHost>) -> Self {
+        self.ctx.pty_host = Some(host);
+        self
+    }
+
     pub fn prompt(&self) -> String {
         format!("5cotts@zo {} % ", self.ctx.env.prompt_cwd())
     }
