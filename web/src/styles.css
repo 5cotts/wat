@@ -5,27 +5,186 @@
 }
 
 html,
-body,
-#terminal {
+body {
   width: 100%;
   height: 100%;
-  background: #1a1a1a;
+  background: #fafafa;
+  overflow: hidden;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  color: #1a1a1a;
+}
+
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
 }
 
-/* Loading overlay */
+.window {
+  position: absolute;
+  background: #1c1c1c;
+  border: 1px solid #d8d8d8;
+  border-radius: 12px;
+  box-shadow:
+    0 30px 60px -20px rgba(0, 0, 0, 0.25),
+    0 10px 20px -10px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition:
+    transform 0.2s ease,
+    opacity 0.2s ease,
+    left 0.25s ease,
+    top 0.25s ease,
+    width 0.25s ease,
+    height 0.25s ease,
+    border-radius 0.25s ease;
+}
+
+.window.dragging,
+.window.resizing {
+  transition: opacity 0.2s ease;
+}
+
+.window.snap-top {
+  left: 16px !important;
+  top: 16px !important;
+  width: calc(100vw - 32px) !important;
+  height: calc(100vh - 32px) !important;
+  border-radius: 8px;
+}
+
+.window.snap-left {
+  left: 0 !important;
+  top: 0 !important;
+  width: 50vw !important;
+  height: 100vh !important;
+  border-radius: 0 8px 8px 0;
+}
+
+.window.snap-right {
+  left: 50vw !important;
+  top: 0 !important;
+  width: 50vw !important;
+  height: 100vh !important;
+  border-radius: 8px 0 0 8px;
+}
+
+.window.minimized {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.96);
+}
+
+.titlebar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  background: linear-gradient(#2a2a2a, #1f1f1f);
+  border-bottom: 1px solid #0e0e0e;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  position: relative;
+}
+
+.titlebar.dragging {
+  cursor: grabbing;
+}
+
+.traffic {
+  display: flex;
+  gap: 8px;
+  z-index: 2;
+  position: relative;
+}
+
+.traffic-btn {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 700;
+  color: transparent;
+}
+
+.traffic-close {
+  background: #ff5f57;
+  color: #5a0000;
+}
+.traffic-min {
+  background: #febc2e;
+  color: #5a3a00;
+  font-size: 11px;
+  font-weight: 900;
+}
+.traffic-max {
+  background: #28c840;
+  color: #003a00;
+  font-weight: 900;
+}
+
+.traffic:hover .traffic-close::before {
+  content: "×";
+}
+.traffic:hover .traffic-min::before {
+  content: "−";
+}
+.traffic:hover .traffic-max::before {
+  content: "⤢";
+}
+.window.snap-top .traffic:hover .traffic-max::before {
+  content: "⤡";
+}
+
+.title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #9a9a9a;
+  pointer-events: none;
+}
+
+.body {
+  flex: 1;
+  position: relative;
+  background: #1a1a1a;
+  padding: 10px 8px 8px 12px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+#terminal {
+  width: 100%;
+  height: 100%;
+}
+
 #loading {
-  position: fixed;
+  position: absolute;
   inset: 0;
   background: #1a1a1a;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 16px;
   color: #888;
-  font-family: monospace;
-  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
   z-index: 100;
   transition: opacity 0.3s ease;
 }
@@ -36,8 +195,8 @@ body,
 }
 
 .spinner {
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
   border: 2px solid #333;
   border-top-color: #888;
   border-radius: 50%;
@@ -45,17 +204,181 @@ body,
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Konami celebration */
 @keyframes flash {
-  0%, 100% { background: #1a1a1a; }
-  25% { background: #1a0a2a; }
-  50% { background: #0a1a1a; }
-  75% { background: #1a1a0a; }
+  0%,
+  100% {
+    background: #1a1a1a;
+  }
+  25% {
+    background: #1a0a2a;
+  }
+  50% {
+    background: #0a1a1a;
+  }
+  75% {
+    background: #1a1a0a;
+  }
 }
 
-body.konami-celebrate {
+body.konami-celebrate .body {
   animation: flash 0.5s ease 3;
+}
+
+/* Resize handles */
+.resize-h {
+  position: absolute;
+  z-index: 5;
+}
+.resize-h.n {
+  top: -3px;
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+.resize-h.s {
+  bottom: -3px;
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+.resize-h.e {
+  right: -3px;
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+.resize-h.w {
+  left: -3px;
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+.resize-h.ne {
+  top: -3px;
+  right: -3px;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+.resize-h.nw {
+  top: -3px;
+  left: -3px;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}
+.resize-h.se {
+  bottom: -3px;
+  right: -3px;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}
+.resize-h.sw {
+  bottom: -3px;
+  left: -3px;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+
+/* Restore chip (minimized) */
+[hidden] {
+  display: none !important;
+}
+
+#restore-chip {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  background: #1c1c1c;
+  color: #e6e6e6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid #0e0e0e;
+  box-shadow: 0 8px 20px -8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
+.chip-traffic {
+  display: flex;
+  gap: 4px;
+}
+.chip-traffic span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.chip-traffic span:nth-child(1) {
+  background: #ff5f57;
+}
+.chip-traffic span:nth-child(2) {
+  background: #febc2e;
+}
+.chip-traffic span:nth-child(3) {
+  background: #28c840;
+}
+
+.chip-arrow {
+  color: #7a7a7a;
+}
+
+#snap-overlay {
+  position: fixed;
+  pointer-events: none;
+  background: rgba(108, 180, 200, 0.18);
+  border: 2px solid rgba(108, 180, 200, 0.55);
+  border-radius: 10px;
+  z-index: 5;
+  transition:
+    left 140ms ease,
+    right 140ms ease,
+    top 140ms ease,
+    bottom 140ms ease,
+    width 140ms ease,
+    height 140ms ease;
+}
+
+/* Touch / coarse-pointer devices: window fills viewport, no drag/resize */
+@media (hover: none) and (pointer: coarse) {
+  .resize-h {
+    display: none;
+  }
+  .titlebar {
+    cursor: default;
+  }
+  .window {
+    left: 8px !important;
+    top: 8px !important;
+    width: calc(100vw - 16px) !important;
+    height: calc(100vh - 16px) !important;
+    border-radius: 10px;
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s ease;
+  }
+  .traffic-min,
+  .traffic-max {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .body {
+    padding: 8px 6px 6px 10px;
+  }
 }
