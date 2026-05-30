@@ -28,9 +28,8 @@ fn noop_spawn_returns_unsupported() {
 
 #[cfg(feature = "native-proc")]
 mod native {
-    use wat_core::process::{
-        ChildProcess as _, ChildStdin, NativeProcessHost, ProcessHost, ProcessSpec,
-    };
+    use std::io::Read as _;
+    use wat_core::process::{ChildStdin, NativeProcessHost, ProcessHost, ProcessSpec};
 
     #[test]
     fn lookup_finds_ls() {
@@ -62,16 +61,9 @@ mod native {
         };
         let mut child = host.spawn(spec, ChildStdin::Null).expect("spawn ok");
 
-        // Drain stdout
+        let mut stdout = child.take_stdout().expect("piped stdout");
         let mut out = Vec::new();
-        let mut buf = [0u8; 256];
-        loop {
-            let n = child.read_stdout(&mut buf).expect("read stdout");
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-        }
+        stdout.read_to_end(&mut out).expect("drain stdout");
         let code = child.wait().expect("wait ok");
 
         assert_eq!(code, 0);

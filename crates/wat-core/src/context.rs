@@ -1,12 +1,15 @@
 use crate::env::Env;
 use crate::history::History;
+use crate::process::{NoopProcessHost, ProcessHost};
 use crate::vfs::{MemoryVfs, Vfs};
 
-/// Combines the shell environment, VFS, and history — passed to eval and builtins.
+/// Combines the shell environment, VFS, history, and host capabilities
+/// (process spawning) — passed to eval and builtins.
 pub struct Context {
     pub env: Env,
     pub vfs: Box<dyn Vfs>,
     pub history: History,
+    pub process_host: Box<dyn ProcessHost>,
 }
 
 impl Context {
@@ -20,6 +23,7 @@ impl Context {
             env: Env::new(),
             vfs,
             history: History::new(100),
+            process_host: Box::new(NoopProcessHost),
         }
     }
 
@@ -29,6 +33,7 @@ impl Context {
             env: Env::new(),
             vfs: Box::new(MemoryVfs::new_seeded()),
             history: History::new(100),
+            process_host: Box::new(NoopProcessHost),
         }
     }
 }

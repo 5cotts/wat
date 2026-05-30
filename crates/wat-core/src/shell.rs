@@ -3,6 +3,7 @@ use crate::context::Context;
 use crate::eval::{eval, eval_streaming};
 use crate::io::{OutputSink, VecSink};
 use crate::parser::parse;
+use crate::process::ProcessHost;
 
 pub struct Shell {
     pub ctx: Context,
@@ -22,6 +23,14 @@ impl Shell {
             ctx: Context::with_memory_vfs(),
             exit_requested: false,
         }
+    }
+
+    /// Replace the process host. Used by the native CLI to swap in a
+    /// `NativeProcessHost`; the default is `NoopProcessHost` so the WASM
+    /// target keeps the "command not found" behavior for unknown commands.
+    pub fn with_process_host(mut self, host: Box<dyn ProcessHost>) -> Self {
+        self.ctx.process_host = host;
+        self
     }
 
     pub fn prompt(&self) -> String {

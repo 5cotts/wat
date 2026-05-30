@@ -58,11 +58,17 @@ pub struct ProcessSpec {
     pub cwd: PathBuf,
 }
 
-/// A running child process. The reader methods return 0 at EOF, matching
-/// `Read::read` semantics, so the caller knows when to stop polling.
+/// A running child process. Stdout and stderr are exposed as detachable
+/// `Read + Send` handles so the caller can drain both concurrently from
+/// reader threads — `read_stdout`/`read_stderr` would deadlock against each
+/// other if either pipe filled.
 pub trait ChildProcess {
-    fn read_stdout(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-    fn read_stderr(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+    /// Take ownership of the child's stdout pipe. Returns `None` if the child
+    /// was spawned without a piped stdout, or if it has already been taken.
+    fn take_stdout(&mut self) -> Option<Box<dyn io::Read + Send>>;
+    /// Take ownership of the child's stderr pipe. Same caveats as
+    /// `take_stdout`.
+    fn take_stderr(&mut self) -> Option<Box<dyn io::Read + Send>>;
     fn wait(&mut self) -> io::Result<i32>;
     fn signal(&mut self, sig: Signal) -> io::Result<()>;
 }
@@ -127,9 +133,6 @@ mod native {
     }
 
     fn is_executable(p: &std::path::Path) -> bool {
-        // On unix, check the executable bit. On non-unix, accept any regular
-        // file — Tier 1 is unix-only per the plan, but this keeps the file
-        // compilable on Windows for editor tooling.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -158,7 +161,8 @@ mod native {
             let mut cmd = Command::new(&spec.argv[0]);
             cmd.args(&spec.argv[1..]);
             cmd.current_dir(&spec.cwd);
-            cmd.env_clear();
+            // Inherit the parent's environment, then layer the shell's vars
+            // on top so e.g. PATH/HOME/PWD from the shell take precedence.
             for (k, v) in spec.env.iter() {
                 cmd.env(k, v);
             }
@@ -187,20 +191,18 @@ mod native {
     }
 
     impl ChildProcess for NativeChild {
-        fn read_stdout(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            use std::io::Read as _;
-            match self.inner.stdout.as_mut() {
-                Some(s) => s.read(buf),
-                None => Ok(0),
-            }
+        fn take_stdout(&mut self) -> Option<Box<dyn io::Read + Send>> {
+            self.inner
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
         }
 
-        fn read_stderr(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            use std::io::Read as _;
-            match self.inner.stderr.as_mut() {
-                Some(s) => s.read(buf),
-                None => Ok(0),
-            }
+        fn take_stderr(&mut self) -> Option<Box<dyn io::Read + Send>> {
+            self.inner
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
         }
 
         fn wait(&mut self) -> io::Result<i32> {
