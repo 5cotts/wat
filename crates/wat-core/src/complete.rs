@@ -1,9 +1,9 @@
 use crate::vfs::Vfs;
 
 const BUILTINS: &[&str] = &[
-    "cat", "cd", "clear", "cp", "cut", "echo", "env", "exit", "export",
-    "false", "grep", "head", "help", "ls", "mkdir", "mv", "pwd", "rm",
-    "sort", "tail", "touch", "tr", "true", "uniq", "unset", "wc",
+    "cat", "cd", "clear", "cp", "cut", "echo", "env", "exit", "export", "false", "grep", "head",
+    "help", "ls", "mkdir", "mv", "pwd", "rm", "sort", "tail", "touch", "tr", "true", "uniq",
+    "unset", "wc",
 ];
 
 /// Return tab completions for `input[..cursor]`.
@@ -22,13 +22,21 @@ pub fn complete(input: &str, cursor: usize, cwd: &str, vfs: &dyn Vfs) -> Vec<Str
         complete_command(prefix)
     } else {
         // Completing a file path argument
-        let path_prefix = if ends_with_space { "" } else { tokens.last().copied().unwrap_or("") };
+        let path_prefix = if ends_with_space {
+            ""
+        } else {
+            tokens.last().copied().unwrap_or("")
+        };
         complete_path(path_prefix, cwd, vfs)
     }
 }
 
 fn complete_command(prefix: &str) -> Vec<String> {
-    BUILTINS.iter().filter(|b| b.starts_with(prefix)).map(|s| s.to_string()).collect()
+    BUILTINS
+        .iter()
+        .filter(|b| b.starts_with(prefix))
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn complete_path(prefix: &str, cwd: &str, vfs: &dyn Vfs) -> Vec<String> {
@@ -93,7 +101,9 @@ mod tests {
     fn complete_absolute_path() {
         let v = vfs();
         let completions = complete("cat /home/user/f", 16, "/", &v);
-        assert!(completions.iter().any(|s| s.contains("file.txt") || s.contains("foo.sh")));
+        assert!(completions
+            .iter()
+            .any(|s| s.contains("file.txt") || s.contains("foo.sh")));
     }
 
     #[test]
@@ -116,6 +126,10 @@ mod tests {
         v.mkdir("/etc").unwrap();
         v.write("/etc/motd", b"").unwrap();
         let completions = complete("cat /etc/m", 10, "/", &v);
-        assert!(completions.contains(&"/etc/motd".to_string()), "got: {:?}", completions);
+        assert!(
+            completions.contains(&"/etc/motd".to_string()),
+            "got: {:?}",
+            completions
+        );
     }
 }

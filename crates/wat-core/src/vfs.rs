@@ -70,7 +70,11 @@ pub struct MemoryVfs {
 
 impl MemoryVfs {
     pub fn new() -> Self {
-        MemoryVfs { root: Node::Dir { entries: BTreeMap::new() } }
+        MemoryVfs {
+            root: Node::Dir {
+                entries: BTreeMap::new(),
+            },
+        }
     }
 
     /// Create a seeded VFS with the personality layout for the Zo Site.
@@ -79,11 +83,8 @@ impl MemoryVfs {
         vfs.mkdir("/home").unwrap();
         vfs.mkdir("/home/5cotts").unwrap();
         vfs.mkdir("/etc").unwrap();
-        vfs.write(
-            "/home/5cotts/whoami.sh",
-            b"#!/bin/sh\necho i am scott\n",
-        )
-        .unwrap();
+        vfs.write("/home/5cotts/whoami.sh", b"#!/bin/sh\necho i am scott\n")
+            .unwrap();
         vfs.write(
             "/home/5cotts/.hints",
             b"You found the hints file!\n\
@@ -183,7 +184,12 @@ impl Vfs for MemoryVfs {
         let (parent, name) = Self::parent_and_name(path);
         match self.get_node_mut(&parent) {
             Some(Node::Dir { entries }) => {
-                entries.insert(name, Node::File { content: content.to_vec() });
+                entries.insert(
+                    name,
+                    Node::File {
+                        content: content.to_vec(),
+                    },
+                );
                 Ok(())
             }
             Some(_) => Err(VfsError::NotADirectory(parent)),
@@ -197,7 +203,11 @@ impl Vfs for MemoryVfs {
                 .iter()
                 .map(|(name, node)| DirEntry {
                     name: name.clone(),
-                    file_type: if node.is_dir() { FileType::Dir } else { FileType::File },
+                    file_type: if node.is_dir() {
+                        FileType::Dir
+                    } else {
+                        FileType::File
+                    },
                 })
                 .collect()),
             Some(_) => Err(VfsError::NotADirectory(path.to_string())),
@@ -212,7 +222,12 @@ impl Vfs for MemoryVfs {
                 if entries.contains_key(&name) {
                     return Err(VfsError::AlreadyExists(path.to_string()));
                 }
-                entries.insert(name, Node::Dir { entries: BTreeMap::new() });
+                entries.insert(
+                    name,
+                    Node::Dir {
+                        entries: BTreeMap::new(),
+                    },
+                );
                 Ok(())
             }
             Some(_) => Err(VfsError::NotADirectory(parent)),
@@ -224,7 +239,9 @@ impl Vfs for MemoryVfs {
         let (parent, name) = Self::parent_and_name(path);
         match self.get_node_mut(&parent) {
             Some(Node::Dir { entries }) => match entries.get(&name) {
-                Some(Node::Dir { entries: child_entries }) => {
+                Some(Node::Dir {
+                    entries: child_entries,
+                }) => {
                     if !recursive && !child_entries.is_empty() {
                         return Err(VfsError::NotEmpty(path.to_string()));
                     }
@@ -314,13 +331,11 @@ impl Vfs for NativeVfs {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), VfsError> {
-        std::fs::create_dir_all(path)
-            .map_err(|_| VfsError::PermissionDenied(path.to_string()))
+        std::fs::create_dir_all(path).map_err(|_| VfsError::PermissionDenied(path.to_string()))
     }
 
     fn remove(&mut self, path: &str, recursive: bool) -> Result<(), VfsError> {
-        let meta =
-            std::fs::metadata(path).map_err(|_| VfsError::NotFound(path.to_string()))?;
+        let meta = std::fs::metadata(path).map_err(|_| VfsError::NotFound(path.to_string()))?;
         if meta.is_dir() {
             if recursive {
                 std::fs::remove_dir_all(path)
@@ -335,8 +350,7 @@ impl Vfs for NativeVfs {
                 })
             }
         } else {
-            std::fs::remove_file(path)
-                .map_err(|_| VfsError::PermissionDenied(path.to_string()))
+            std::fs::remove_file(path).map_err(|_| VfsError::PermissionDenied(path.to_string()))
         }
     }
 
@@ -372,7 +386,9 @@ mod tests {
         let mut vfs = fresh();
         vfs.mkdir("/foo").unwrap();
         let entries = vfs.list("/").unwrap();
-        assert!(entries.iter().any(|e| e.name == "foo" && e.file_type == FileType::Dir));
+        assert!(entries
+            .iter()
+            .any(|e| e.name == "foo" && e.file_type == FileType::Dir));
     }
 
     #[test]
@@ -419,7 +435,10 @@ mod tests {
         let mut vfs = fresh();
         vfs.mkdir("/nonempty").unwrap();
         vfs.write("/nonempty/f", b"x").unwrap();
-        assert!(matches!(vfs.remove("/nonempty", false), Err(VfsError::NotEmpty(_))));
+        assert!(matches!(
+            vfs.remove("/nonempty", false),
+            Err(VfsError::NotEmpty(_))
+        ));
     }
 
     #[test]

@@ -82,7 +82,9 @@ fn snap_newline() {
 
 #[test]
 fn snap_full_acceptance() {
-    assert_debug_snapshot!(toks(r#"echo "hello world" | grep h > out.txt && cat out.txt"#));
+    assert_debug_snapshot!(toks(
+        r#"echo "hello world" | grep h > out.txt && cat out.txt"#
+    ));
 }
 
 #[test]

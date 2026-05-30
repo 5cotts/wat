@@ -6,7 +6,10 @@ pub struct History {
 
 impl History {
     pub fn new(capacity: usize) -> Self {
-        History { entries: Vec::new(), capacity }
+        History {
+            entries: Vec::new(),
+            capacity,
+        }
     }
 
     pub fn push(&mut self, cmd: impl Into<String>) {

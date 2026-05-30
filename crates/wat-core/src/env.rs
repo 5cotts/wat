@@ -12,8 +12,15 @@ impl Env {
         let mut vars = HashMap::new();
         vars.insert("HOME".to_string(), home.clone());
         vars.insert("PWD".to_string(), home.clone());
-        vars.insert("PATH".to_string(), "/usr/local/bin:/usr/bin:/bin".to_string());
-        Self { vars, cwd: home, last_exit_code: 0 }
+        vars.insert(
+            "PATH".to_string(),
+            "/usr/local/bin:/usr/bin:/bin".to_string(),
+        );
+        Self {
+            vars,
+            cwd: home,
+            last_exit_code: 0,
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -33,7 +40,10 @@ impl Env {
     }
 
     pub fn home(&self) -> &str {
-        self.vars.get("HOME").map(|s| s.as_str()).unwrap_or("/home/5cotts")
+        self.vars
+            .get("HOME")
+            .map(|s| s.as_str())
+            .unwrap_or("/home/5cotts")
     }
 
     pub fn prompt_cwd(&self) -> String {

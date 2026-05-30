@@ -16,7 +16,10 @@ impl std::fmt::Display for ParseError {
 
 impl From<LexError> for ParseError {
     fn from(e: LexError) -> Self {
-        ParseError { message: e.message, offset: e.offset }
+        ParseError {
+            message: e.message,
+            offset: e.offset,
+        }
     }
 }
 
@@ -162,7 +165,11 @@ impl Parser {
         }
 
         let name = words.remove(0);
-        Ok(Command { name, args: words, redirects })
+        Ok(Command {
+            name,
+            args: words,
+            redirects,
+        })
     }
 
     fn expect_word(&mut self, msg: &str) -> Result<String, ParseError> {
@@ -172,7 +179,10 @@ impl Parser {
                 self.advance();
                 Ok(w)
             }
-            _ => Err(ParseError { message: msg.to_string(), offset }),
+            _ => Err(ParseError {
+                message: msg.to_string(),
+                offset,
+            }),
         }
     }
 }
@@ -201,7 +211,10 @@ mod tests {
     #[test]
     fn simple_command() {
         let list = parse("echo hello").unwrap();
-        assert_eq!(list.0, vec![(Pipeline(vec![cmd("echo", &["hello"])]), Separator::End)]);
+        assert_eq!(
+            list.0,
+            vec![(Pipeline(vec![cmd("echo", &["hello"])]), Separator::End)]
+        );
     }
 
     #[test]
@@ -209,7 +222,10 @@ mod tests {
         let list = parse("ls | grep foo").unwrap();
         assert_eq!(
             list.0,
-            vec![(Pipeline(vec![cmd("ls", &[]), cmd("grep", &["foo"])]), Separator::End)]
+            vec![(
+                Pipeline(vec![cmd("ls", &[]), cmd("grep", &["foo"])]),
+                Separator::End
+            )]
         );
     }
 
@@ -294,10 +310,13 @@ mod tests {
     fn multiple_redirects() {
         let list = parse("cmd < in.txt > out.txt").unwrap();
         let cmd = &list.0[0].0 .0[0];
-        assert_eq!(cmd.redirects, vec![
-            Redirect::In("in.txt".into()),
-            Redirect::Out("out.txt".into()),
-        ]);
+        assert_eq!(
+            cmd.redirects,
+            vec![
+                Redirect::In("in.txt".into()),
+                Redirect::Out("out.txt".into()),
+            ]
+        );
     }
 
     #[test]

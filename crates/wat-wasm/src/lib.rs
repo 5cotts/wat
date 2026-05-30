@@ -9,7 +9,9 @@ pub struct Shell {
 impl Shell {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Shell {
-        Shell { inner: wat_core::Shell::with_memory_vfs() }
+        Shell {
+            inner: wat_core::Shell::with_memory_vfs(),
+        }
     }
 }
 
@@ -21,7 +23,6 @@ impl Default for Shell {
 
 #[wasm_bindgen]
 impl Shell {
-
     pub fn prompt(&self) -> String {
         self.inner.prompt()
     }
