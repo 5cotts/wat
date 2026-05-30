@@ -146,7 +146,15 @@ impl Drop for RawModeGuard {
 /// blocking `read` on stdin even after the child exits, and joining
 /// would hang the REPL until the user pressed a key. Leaking it per
 /// command is acceptable for Tier 2; Tier 3 will revisit.
+///
+/// SIGWINCH (terminal resize) is forwarded via a background thread that
+/// reads from a `signal_hook::iterator::Signals`. When the user resizes
+/// their terminal, the thread queries the new size from crossterm and
+/// calls `child.resize(...)` so apps like `less` re-paint at the new
+/// dimensions immediately.
 fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
+    use std::sync::{Arc, Mutex};
+
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let dims = PtyDims { rows, cols };
     let mut child = match shell.spawn_pty(input, dims) {
@@ -158,6 +166,10 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
     };
     let mut reader = child.master_reader().expect("master reader");
     let mut writer = child.master_writer().expect("master writer");
+    // From here on `child` only needs `resize()` (from the SIGWINCH thread)
+    // and `wait()` (from this thread, at the end). Wrap in Arc<Mutex<>> so
+    // both can share it.
+    let child = Arc::new(Mutex::new(child));
 
     let _guard = match RawModeGuard::enter() {
         Ok(g) => g,
@@ -166,6 +178,35 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
             return 1;
         }
     };
+
+    // SIGWINCH forwarding. signal-hook installs an async-signal-safe
+    // handler internally; `Signals::forever()` blocks on a self-pipe in
+    // this background thread and yields events as they arrive. On each
+    // event we query the new terminal size and call `child.resize`. When
+    // we close the handle at the bottom of this function, `forever()`
+    // returns `None` and the thread exits.
+    #[cfg(unix)]
+    let (winch_handle, winch_thread) = {
+        use signal_hook::iterator::Signals;
+        let mut signals =
+            Signals::new([signal_hook::consts::SIGWINCH]).expect("install SIGWINCH handler");
+        let handle = signals.handle();
+        let child_for_winch = child.clone();
+        let join = std::thread::spawn(move || {
+            for _signal in signals.forever() {
+                let Ok((cols, rows)) = crossterm::terminal::size() else {
+                    continue;
+                };
+                if let Ok(mut child) = child_for_winch.lock() {
+                    let _ = child.resize(PtyDims { rows, cols });
+                }
+            }
+        });
+        (Some(handle), Some(join))
+    };
+    #[cfg(not(unix))]
+    let (winch_handle, winch_thread): (Option<()>, Option<std::thread::JoinHandle<()>>) =
+        (None, None);
 
     // stdin → master, in a detached thread.
     std::thread::spawn(move || {
@@ -202,5 +243,23 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         }
     }
 
-    child.wait().unwrap_or(1)
+    let code = child.lock().expect("child mutex").wait().unwrap_or(1);
+
+    // Tear down the SIGWINCH handler before returning so a resize at the
+    // prompt doesn't try to call `resize` on a dead child.
+    #[cfg(unix)]
+    {
+        if let Some(h) = winch_handle {
+            h.close();
+        }
+        if let Some(t) = winch_thread {
+            let _ = t.join();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (winch_handle, winch_thread);
+    }
+
+    code
 }
