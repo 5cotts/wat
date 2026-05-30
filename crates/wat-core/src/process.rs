@@ -49,6 +49,13 @@ pub enum ChildStdin {
     Inherit,
     /// Close stdin immediately (equivalent to redirecting from /dev/null).
     Null,
+    /// Stream from a pre-existing reader (typically the previous external
+    /// segment's `take_stdout()`). The host spawns a writer thread that
+    /// copies the reader into the child's stdin pipe — a "software pipe".
+    /// When the downstream child closes its stdin (e.g. `head -1` exits),
+    /// the writer drops the reader and the upstream child sees SIGPIPE on
+    /// its next write.
+    Pipe(Box<dyn std::io::Read + Send>),
 }
 
 /// What to run, where, and with what env.
@@ -169,18 +176,33 @@ mod native {
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             cmd.stdin(match &stdin {
-                ChildStdin::Bytes(_) => Stdio::piped(),
+                ChildStdin::Bytes(_) | ChildStdin::Pipe(_) => Stdio::piped(),
                 ChildStdin::Inherit => Stdio::inherit(),
                 ChildStdin::Null => Stdio::null(),
             });
 
             let mut child = cmd.spawn().map_err(ProcessError::Io)?;
-            if let ChildStdin::Bytes(bytes) = stdin {
-                if let Some(mut stdin_handle) = child.stdin.take() {
-                    use std::io::Write as _;
-                    let _ = stdin_handle.write_all(&bytes);
-                    // dropping closes the pipe so the child sees EOF
+            match stdin {
+                ChildStdin::Bytes(bytes) => {
+                    if let Some(mut stdin_handle) = child.stdin.take() {
+                        use std::io::Write as _;
+                        let _ = stdin_handle.write_all(&bytes);
+                        // dropping closes the pipe so the child sees EOF
+                    }
                 }
+                ChildStdin::Pipe(mut reader) => {
+                    if let Some(mut stdin_handle) = child.stdin.take() {
+                        std::thread::spawn(move || {
+                            // copy() returns on EOF of the reader or on
+                            // BrokenPipe from the writer (downstream child
+                            // closed its stdin). Either way we just exit;
+                            // dropping `reader` closes the upstream side,
+                            // which propagates SIGPIPE back to the producer.
+                            let _ = std::io::copy(&mut reader, &mut stdin_handle);
+                        });
+                    }
+                }
+                ChildStdin::Inherit | ChildStdin::Null => {}
             }
             Ok(Box::new(NativeChild { inner: child }))
         }
