@@ -157,6 +157,81 @@ fn repl_can_run_normal_command_after_pty_command() {
 }
 
 #[test]
+fn resize_propagates_to_running_pty_child() {
+    // Spawn wat in an 24x80 PTY. Run a python process that polls
+    // `os.get_terminal_size()` once per 100ms for ~2s and prints whenever
+    // the value changes. After 300ms (long enough for python to install
+    // its handler and start polling), resize the master to 50x120. The
+    // child should observe the new size — wat's SIGWINCH handler turns
+    // around and calls `child.resize(...)`, which sets the slave PTY's
+    // winsize, and python's poll picks it up on its next iteration.
+    //
+    // Using polling instead of signal.signal(SIGWINCH, ...) because the
+    // SIGWINCH-handler approach is racy across Python implementations
+    // and the test just needs to prove that the slave's winsize changes.
+    let (master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    let py = "python3 -c \"import os, sys, time\\nlast = None\\nfor _ in range(20):\\n  s = os.get_terminal_size()\\n  if s != last:\\n    print(f'size={s.columns}x{s.lines}', flush=True)\\n    last = s\\n  time.sleep(0.1)\"\n";
+    writer.write_all(py.as_bytes()).expect("write py");
+
+    // Give python a moment to start polling and print its initial size.
+    std::thread::sleep(Duration::from_millis(300));
+    // Update the outer master's window size so crossterm inside wat-cli
+    // reads back the new dimensions when its SIGWINCH handler fires.
+    master
+        .resize(PtySize {
+            rows: 50,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize master");
+    // In a real terminal, TIOCSWINSZ on the master automatically delivers
+    // SIGWINCH to the controlling pgrp of the slave (xterm/iterm/etc.
+    // depend on this). portable-pty's test-process-as-master setup
+    // doesn't reliably trigger that delivery here, so send the signal
+    // explicitly. wat-cli's handler then reads the (already updated) dims
+    // via crossterm and forwards them to the inner PTY where python is
+    // running — the same chain that runs in production.
+    if let Some(pid) = child.process_id() {
+        unsafe {
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            kill(pid as i32, 28); // SIGWINCH == 28 on Linux
+        }
+    }
+
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains("size=80x24"),
+        "expected initial size=80x24, got: {:?}",
+        after
+    );
+    assert!(
+        after.contains("size=120x50"),
+        "expected resized size=120x50, got: {:?}",
+        after
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().ok();
+            panic!("wat did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn repl_pty_command_nonzero_exit_does_not_hang_repl() {
     let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
     let deadline = || Instant::now() + READ_TIMEOUT;
