@@ -6,7 +6,12 @@ A POSIX-flavored shell written in Rust that runs natively and compiles to WebAss
 
 The native CLI (`wat-cli`) can run real external programs (`git`, `ls`,
 `cargo`, anything on `PATH`) with live-streaming output and Ctrl-C
-cancellation. It is **not** a login-shell replacement — see
+cancellation. Interactive foreground commands (`vim`, `less`, `htop`,
+`python3`, `man`, etc.) run inside a real pseudo-terminal so full-screen
+TUIs and line-editing work the same as in `bash` / `zsh`. Terminal
+resizes propagate to the child via SIGWINCH.
+
+It is **not** a login-shell replacement — see
 [Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
 for the explicit non-goals.
 
@@ -70,9 +75,9 @@ hosts [xterm.js](https://xtermjs.org) and forwards keystrokes into the WASM modu
 ```mermaid
 flowchart TB
   subgraph Rust["Rust workspace (cargo)"]
-    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval · builtins<br/>Vfs trait · ProcessHost trait · io"]
-    cli["<b>wat-cli</b> (bin)<br/>native REPL<br/>NativeVfs + NativeProcessHost<br/>signal-hook SIGINT handler"]
-    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell<br/>MemoryVfs + NoopProcessHost"]
+    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval · builtins<br/>Vfs trait · ProcessHost trait · PtyHost trait · io"]
+    cli["<b>wat-cli</b> (bin)<br/>native REPL<br/>NativeVfs + NativeProcessHost + NativePtyHost<br/>signal-hook SIGINT + SIGWINCH<br/>crossterm raw mode"]
+    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell<br/>MemoryVfs + NoopProcessHost<br/>(no PtyHost — pty module not compiled)"]
     core --> cli
     core --> wasm
   end
@@ -174,7 +179,8 @@ sequenceDiagram
 | `crates/wat-core/src/history.rs` | Command history (powers ↑/↓). |
 | `crates/wat-core/src/io.rs` | `OutputSink` trait, `ShellIo` buffers + `emit_side_effect()` (writes `OSC 9999;{json}\x07`). |
 | `crates/wat-core/src/process.rs` | `ProcessHost` / `ChildProcess` / `Signal` traits; `NativeProcessHost` (gated on `native-proc`) and `NoopProcessHost` (default, WASM). |
-| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. `cancel_flag()` exposes the SIGINT atomic. |
+| `crates/wat-core/src/pty.rs` | `PtyHost` / `PtyChild` / `PtyDims` traits and `NativePtyHost` (gated on `native-pty`). WASM never compiles this — the module is gated out entirely so `portable-pty` stays out of the bundle. |
+| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. `cancel_flag()` exposes the SIGINT atomic; `with_pty_host`, `spawn_pty`, and `pty_eligible` drive the interactive PTY path. |
 | `crates/wat-wasm/src/lib.rs` | `#[wasm_bindgen]` wrapper exposing `Shell::new/prompt/feed/complete/history_at` to JS. |
 | `crates/wat-cli/src/main.rs` | Native REPL (not used in browser). |
 | `web/index.html` | DOM scaffold: window chrome, `#terminal` mount, loader. |
@@ -206,24 +212,22 @@ browser also runs in `wat-cli`, which simply ignores any `OSC 9999` it might emi
 
 ## Use as a scratch shell on macOS
 
-`wat-cli` can run real external programs, stream their output live, and
-honor Ctrl-C. After `just build-native`, drop the binary somewhere on
-your `PATH`:
+`wat-cli` can run real external programs, stream their output live,
+honor Ctrl-C, and run full-screen TUI apps (`vim`, `less`, `htop`,
+`man`, `python3`, etc.) inside a real pseudo-terminal. After `just
+build-native`, drop the binary somewhere on your `PATH`:
 
 ```sh
 just install-mac   # copies target/release/wat → ~/.local/bin/wat
 ```
 
 Then `wat` from your terminal gets you a REPL where `git status`, `ls -la
-| grep something | wc -l`, `cargo build`, and `sleep 30` + Ctrl-C all
-work as expected.
+| grep something | wc -l`, `cargo build`, `sleep 30` + Ctrl-C, and `vim
+README.md` all work as expected.
 
-**Do not make this your login shell.** Tier 1 explicitly does *not*
+**Do not make this your login shell.** wat explicitly does *not*
 implement:
 
-- **PTY / raw-mode apps.** `vim`, `less`, `htop`, `top`, anything that
-  draws on the screen, will not work — they need a real PTY and that's
-  Tier 2.
 - **Job control.** No `Ctrl-Z`, no `&`, no `bg` / `fg` / `jobs`. Once a
   command starts, it runs in the foreground until it exits or you
   interrupt it. That's Tier 3.
@@ -233,6 +237,24 @@ implement:
 
 Treat it as a credible *scratch* shell — fun to drive on purpose, not a
 replacement for `zsh`.
+
+### How PTY routing works
+
+For each command typed at the prompt, wat-cli decides whether to spawn
+inside a PTY (interactive raw-mode path) or run through the buffered
+streaming path. The PTY path is used iff **all** of the following hold:
+
+1. The input parses to a single-command pipeline (no `|`, no `;`, no
+   `&&`/`||`).
+2. The command has no redirects (no `<`, `>`, `>>`, `2>`).
+3. The command name doesn't shadow a wat builtin.
+4. The command name resolves on `PATH`.
+5. wat-cli's own stdin is a real TTY.
+
+Otherwise the existing buffered path runs — so capture-style callers,
+scripts, pipelines, and redirection all behave the same as in Tier 1.
+The routing rule lives in `Shell::pty_eligible` so it stays in sync
+with the parser and the builtin set as both evolve.
 
 ## Adding a builtin
 
