@@ -10,6 +10,7 @@ pub mod history;
 pub mod io;
 pub mod lexer;
 pub mod parser;
+pub mod process;
 pub mod shell;
 pub mod vfs;
 

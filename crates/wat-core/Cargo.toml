@@ -9,6 +9,7 @@ crate-type = ["rlib"]
 [features]
 default = []
 native-fs = []
+native-proc = []
 
 [dependencies]
 

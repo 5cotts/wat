@@ -8,4 +8,4 @@ name = "wat"
 path = "src/main.rs"
 
 [dependencies]
-wat-core = { path = "../wat-core", features = ["native-fs"] }
+wat-core = { path = "../wat-core", features = ["native-fs", "native-proc"] }
