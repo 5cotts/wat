@@ -8,6 +8,13 @@ bootstrap:
 build-native:
     cargo build -p wat-cli --release
 
+# Install wat to ~/.local/bin as a macOS scratch shell (see README — not a login shell)
+install-mac: build-native
+    mkdir -p ~/.local/bin
+    cp target/release/wat ~/.local/bin/wat
+    @echo "Installed wat to ~/.local/bin/wat"
+    @echo "Make sure ~/.local/bin is on your PATH."
+
 # Build the WASM package for the web (dev mode)
 build-wasm:
     {{wasm-pack}} build crates/wat-wasm --target web --out-dir ../../web/pkg
