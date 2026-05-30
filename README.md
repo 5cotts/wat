@@ -51,6 +51,152 @@ crates/
 web/          # Vite + xterm.js Zo Site
 ```
 
+## Architecture
+
+### How the pieces fit together
+
+`wat-core` is the source of truth — a Rust library (no `std::fs` in default features)
+that knows how to lex, parse, evaluate, and complete shell input. Two thin shells
+wrap it for their respective platforms: `wat-cli` for the terminal, `wat-wasm` for
+the browser. The browser side is glued together by a small TypeScript layer that
+hosts [xterm.js](https://xtermjs.org) and forwards keystrokes into the WASM module.
+
+```mermaid
+flowchart TB
+  subgraph Rust["Rust workspace (cargo)"]
+    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval<br/>builtins · vfs · io"]
+    cli["<b>wat-cli</b> (bin)<br/>native REPL"]
+    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell"]
+    core --> cli
+    core --> wasm
+  end
+
+  subgraph Build["Build outputs"]
+    binary["target/release/wat<br/>(native binary)"]
+    pkg["web/pkg/<br/>wat_wasm.js + wat_wasm_bg.wasm"]
+    cli --> binary
+    wasm -- "wasm-pack build --target web" --> pkg
+  end
+
+  subgraph Web["web/ (Zo Site — Vite + xterm.js)"]
+    html["index.html<br/>window-chrome DOM, #terminal"]
+    main["src/main.ts<br/>xterm init, key handler,<br/>line buffer, WASM loader"]
+    bridge["src/shell-bridge.ts<br/>JS↔WASM glue, OSC 9999 dispatcher"]
+    chrome["src/window-chrome.ts<br/>macOS traffic lights, drag, resize"]
+    css["src/styles.css<br/>theme + window styles"]
+    html --> main
+    main --> bridge
+    main --> chrome
+    html -.-> css
+  end
+
+  pkg -. "dynamic import('../pkg/wat_wasm.js')" .-> main
+  bridge -. "calls Shell.feed / prompt / complete" .-> pkg
+
+  Web -- "vite build" --> dist["web/dist/<br/>(static HTML + JS + WASM)"]
+  dist -- "vite preview / Zo Site" --> live["https://wat-5cotts.zo.computer"]
+```
+
+### What happens when you type a command
+
+The browser never runs a real process — it hands every keystroke to xterm.js, lets
+`main.ts` buffer a line, and on Enter forwards the full line into the WASM `Shell`.
+The shell's stdout can contain ordinary text *and* `OSC 9999` escape sequences that
+encode side effects (redirect, konami celebration, VFS persistence). `shell-bridge.ts`
+strips and dispatches those before the visible output reaches xterm.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant X as xterm.js
+  participant M as main.ts
+  participant B as shell-bridge.ts
+  participant W as wat-wasm (Shell)
+  participant C as wat-core
+  participant DOM as Browser DOM<br/>(location, body, localStorage)
+
+  Note over M: Page load — static prompt shown, WASM not yet fetched
+  U->>X: first keystroke
+  X->>M: onData(key)
+  M->>M: loadWasm() → fetch wat_wasm_bg.wasm
+  M->>W: new Shell()
+  M->>B: new Bridge(shell, handleSideEffect)
+  M->>X: write(bridge.prompt())
+
+  loop per keystroke
+    U->>X: keypress
+    X->>M: onData(data)
+    alt printable char
+      M->>M: lineBuffer += data
+      M->>X: echo char
+    else Tab
+      M->>B: complete(lineBuffer)
+      B->>W: shell.complete(...)
+      W->>C: completion engine
+      W-->>M: candidates
+      M->>X: write completion / list
+    else Enter
+      M->>B: feed(lineBuffer)
+      B->>W: shell.feed(line)
+      W->>C: lex → parse → eval → builtins → ShellIo
+      C-->>W: stdout (text + OSC 9999 JSON)
+      W-->>B: raw string
+      B->>B: strip OSC, parse JSON side effects
+      B-->>M: visible text + side-effect callbacks
+      M->>X: write(visible)
+      M->>DOM: redirect / class / localStorage
+      M->>X: write(bridge.prompt())
+    end
+  end
+```
+
+### File responsibilities
+
+| File | Role in the running browser shell |
+|---|---|
+| `crates/wat-core/src/lexer.rs` | Tokenizes input into words, operators, quotes. |
+| `crates/wat-core/src/parser.rs` | Turns tokens into an AST of commands and pipelines. |
+| `crates/wat-core/src/ast.rs` | AST node definitions. |
+| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines, wires stdin/stdout. |
+| `crates/wat-core/src/builtins/` | Each builtin (`echo`, `cd`, `ls`, `cat`, easter eggs, …). |
+| `crates/wat-core/src/vfs.rs` | In-memory virtual filesystem (the only VFS used in the browser). |
+| `crates/wat-core/src/env.rs` | Environment vars + working directory. |
+| `crates/wat-core/src/expand.rs` | Variable expansion + quoting rules. |
+| `crates/wat-core/src/glob.rs` | Pattern matching for `*` / `?`. |
+| `crates/wat-core/src/complete.rs` | Tab-completion candidates. |
+| `crates/wat-core/src/history.rs` | Command history (powers ↑/↓). |
+| `crates/wat-core/src/io.rs` | `ShellIo` buffers + `emit_side_effect()` (writes `OSC 9999;{json}\x07`). |
+| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. |
+| `crates/wat-wasm/src/lib.rs` | `#[wasm_bindgen]` wrapper exposing `Shell::new/prompt/feed/complete/history_at` to JS. |
+| `crates/wat-cli/src/main.rs` | Native REPL (not used in browser). |
+| `web/index.html` | DOM scaffold: window chrome, `#terminal` mount, loader. |
+| `web/src/main.ts` | xterm setup, key handler, line buffer, history index, tab completion, lazy WASM loader, side-effect dispatcher, Konami detector. |
+| `web/src/shell-bridge.ts` | JS↔WASM seam. Forwards calls to `Shell` and parses `OSC 9999` sequences out of stdout. |
+| `web/src/window-chrome.ts` | macOS traffic-light buttons, dragging, resize handles, minimize/restore. |
+| `web/src/styles.css` | Dark theme, window chrome styling, Konami flash animation. |
+| `web/vite.config.ts` | Vite config (allowed hosts, HMR off for the Zo dev URL). |
+| `web/pkg/wat_wasm.js` | wasm-pack glue: loads the `.wasm` and exports the `Shell` class. |
+| `web/pkg/wat_wasm_bg.wasm` | Compiled `wat-core` + `wat-wasm` (~115 KB). |
+| `web/zosite.json` | Zo Site manifest — dev entrypoint + publish config. |
+
+### The OSC 9999 side-effect channel
+
+WASM can't navigate the page, animate the DOM, or write to `localStorage` directly
+from inside `wat-core`. Instead, builtins call `ShellIo::emit_side_effect()`, which
+inlines an `OSC 9999;{json}\x07` escape into stdout. `shell-bridge.ts` is the only
+piece of JS that knows about this protocol — it pulls those sequences out of the
+output stream and turns them into real browser actions:
+
+| Side effect | Emitted by | Handled in `main.ts` as |
+|---|---|---|
+| `{type: "redirect", url, delay_ms}` | builtins that "open" external sites | `window.location.href = url` |
+| `{type: "konami_celebrate"}` | Konami detector (`__konami__` feed) | `body.classList.add("konami-celebrate")` + banner |
+| `{type: "persist_vfs", snapshot}` | VFS persistence builtin | `localStorage.setItem("wat_vfs_snapshot", …)` |
+
+This keeps `wat-core` pure Rust and host-agnostic — the same shell that runs in the
+browser also runs in `wat-cli`, which simply ignores any `OSC 9999` it might emit.
+
 ## Adding a builtin
 
 1. Add a module in `crates/wat-core/src/builtins/`.
