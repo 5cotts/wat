@@ -3,6 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { Bridge } from "./shell-bridge.js";
+import { initWindowChrome } from "./window-chrome.js";
 
 // ── Terminal setup ───────────────────────────────────────────────────────────
 
@@ -35,11 +36,23 @@ term.loadAddon(new WebLinksAddon());
 const el = document.getElementById("terminal")!;
 const loadingEl = document.getElementById("loading")!;
 
+// Wire window chrome → xterm resize before mounting the terminal so the
+// initial layout is correct.
+initWindowChrome({
+  onResize: () => {
+    try {
+      fitAddon.fit();
+    } catch {
+      /* terminal not mounted yet */
+    }
+  },
+});
+
 term.open(el);
+term.focus();
 fitAddon.fit();
 window.addEventListener("resize", () => fitAddon.fit());
 
-// Show a static prompt before WASM loads (lazy-load on first interaction)
 const STATIC_PROMPT = "5cotts@zo ~ % ";
 term.write(STATIC_PROMPT);
 
@@ -81,7 +94,9 @@ async function loadWasm() {
 
   loadingEl.style.display = "flex";
 
-  const { Shell } = await import("../pkg/wat_wasm.js");
+  const wasmModule = await import("../pkg/wat_wasm.js");
+  await wasmModule.default();
+  const { Shell } = wasmModule;
   const { Bridge: BridgeClass } = await import("./shell-bridge.js");
 
   bridge = new BridgeClass(new Shell(), handleSideEffect);
@@ -92,6 +107,8 @@ async function loadWasm() {
   term.clear();
   term.write(bridge.prompt());
 }
+
+loadWasm();
 
 function handleSideEffect(effect: { type: string; url?: string; delay_ms?: number }) {
   switch (effect.type) {

@@ -2,16 +2,44 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>wat</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="loading">
-      <div class="spinner"></div>
-      <span>loading wat...</span>
-    </div>
-    <div id="terminal"></div>
+    <main id="app">
+      <div id="window" class="window">
+        <div id="titlebar" class="titlebar">
+          <div class="traffic" id="traffic">
+            <button class="traffic-btn traffic-close" type="button" aria-label="close" data-traffic></button>
+            <button class="traffic-btn traffic-min" type="button" aria-label="minimize" data-traffic></button>
+            <button class="traffic-btn traffic-max" type="button" aria-label="maximize" data-traffic></button>
+          </div>
+          <div class="title" id="title-text">5cotts@zo: ~ wat</div>
+        </div>
+        <div class="body" id="body">
+          <div id="loading">
+            <div class="spinner"></div>
+            <span>loading wat...</span>
+          </div>
+          <div id="terminal"></div>
+        </div>
+        <div class="resize-h n" data-resize="n"></div>
+        <div class="resize-h s" data-resize="s"></div>
+        <div class="resize-h e" data-resize="e"></div>
+        <div class="resize-h w" data-resize="w"></div>
+        <div class="resize-h ne" data-resize="ne"></div>
+        <div class="resize-h nw" data-resize="nw"></div>
+        <div class="resize-h se" data-resize="se"></div>
+        <div class="resize-h sw" data-resize="sw"></div>
+      </div>
+      <button id="restore-chip" type="button" hidden>
+        <span class="chip-traffic"><span></span><span></span><span></span></span>
+        <span class="chip-label">5cotts@zo: ~ wat</span>
+        <span class="chip-arrow">↗</span>
+      </button>
+      <div id="snap-overlay" hidden></div>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
