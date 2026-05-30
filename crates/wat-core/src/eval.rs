@@ -4,19 +4,21 @@ use crate::builtins::run_builtin;
 use crate::context::Context;
 use crate::expand::expand_word;
 use crate::glob::glob_expand;
-use crate::io::ShellIo;
+use crate::io::{OutputSink, ShellIo, VecSink};
 
-/// Evaluate a parsed command list. Returns `(exit_code, combined_output)`.
-/// Both stdout and stderr are interleaved in the output string (stderr is mixed in unless redirected).
-pub fn eval(list: &List, ctx: &mut Context) -> (i32, String) {
-    let mut combined = Vec::<u8>::new();
+/// Evaluate a parsed command list, streaming output into the supplied sinks
+/// as it is produced. Returns the exit code of the last pipeline.
+pub fn eval_streaming(
+    list: &List,
+    ctx: &mut Context,
+    out: &mut dyn OutputSink,
+    err: &mut dyn OutputSink,
+) -> i32 {
     let mut last_code = 0i32;
 
     let mut iter = list.0.iter().peekable();
     while let Some((pipeline, sep)) = iter.next() {
-        let (code, stdout, stderr) = eval_pipeline(pipeline, ctx, &[]);
-        combined.extend_from_slice(&stdout);
-        combined.extend_from_slice(&stderr);
+        let code = eval_pipeline(pipeline, ctx, &[], out, err);
         ctx.env.last_exit_code = code;
         last_code = code;
 
@@ -35,39 +37,65 @@ pub fn eval(list: &List, ctx: &mut Context) -> (i32, String) {
         }
     }
 
-    (last_code, String::from_utf8_lossy(&combined).into_owned())
+    last_code
+}
+
+/// Buffered convenience wrapper around `eval_streaming` that returns
+/// `(exit_code, combined_output_string)`. Stderr is interleaved into the
+/// returned string, matching the pre-streaming behavior.
+pub fn eval(list: &List, ctx: &mut Context) -> (i32, String) {
+    let mut out = VecSink::new();
+    let mut err = VecSink::new();
+    let code = eval_streaming(list, ctx, &mut out, &mut err);
+    let mut combined = out.into_inner();
+    combined.extend_from_slice(err.as_slice());
+    (code, String::from_utf8_lossy(&combined).into_owned())
 }
 
 /// Run a pipeline, chaining stdout of each command to stdin of the next.
-/// Returns `(exit_code, stdout_bytes, stderr_bytes)`.
+/// Inner segments buffer their stdout into a `VecSink` so it can become the
+/// next segment's stdin. The final segment streams stdout into `final_out`.
+/// Stderr from every segment is forwarded to `final_err` as it is produced.
 fn eval_pipeline(
     pipeline: &Pipeline,
     ctx: &mut Context,
     initial_stdin: &[u8],
-) -> (i32, Vec<u8>, Vec<u8>) {
+    final_out: &mut dyn OutputSink,
+    final_err: &mut dyn OutputSink,
+) -> i32 {
     let cmds = &pipeline.0;
     let mut stdin_data: Vec<u8> = initial_stdin.to_vec();
-    let mut all_stderr: Vec<u8> = Vec::new();
+    let mut last_code = 0i32;
 
     for (idx, cmd) in cmds.iter().enumerate() {
         let is_last = idx + 1 == cmds.len();
-        let (code, stdout, stderr) = run_command(cmd, ctx, &stdin_data);
-        all_stderr.extend_from_slice(&stderr);
-        ctx.env.last_exit_code = code;
-
         if is_last {
-            return (code, stdout, all_stderr);
+            let code = run_command(cmd, ctx, &stdin_data, final_out, final_err);
+            ctx.env.last_exit_code = code;
+            last_code = code;
+        } else {
+            let mut buffered_out = VecSink::new();
+            let code = run_command(cmd, ctx, &stdin_data, &mut buffered_out, final_err);
+            ctx.env.last_exit_code = code;
+            last_code = code;
+            stdin_data = buffered_out.into_inner();
         }
-        stdin_data = stdout;
     }
 
-    (0, Vec::new(), all_stderr)
+    last_code
 }
 
-/// Run a single command, handling redirects. Returns `(exit_code, stdout, stderr)`.
-fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
+/// Run a single command, handling redirects and writing output to the supplied
+/// sinks. If the command has any output redirects, output is buffered locally
+/// so it can be routed to the VFS instead of the outer sinks.
+fn run_command(
+    cmd: &Command,
+    ctx: &mut Context,
+    stdin_data: &[u8],
+    out_sink: &mut dyn OutputSink,
+    err_sink: &mut dyn OutputSink,
+) -> i32 {
     let name = expand_word(&cmd.name, &ctx.env);
-    // Expand variables then glob-expand each argument
     let args: Vec<String> = cmd
         .args
         .iter()
@@ -77,7 +105,6 @@ fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec
         })
         .collect();
 
-    // Rewrite `bash whoami.sh` / `sh whoami.sh` → easter egg command
     let name = if (name == "bash" || name == "sh")
         && args.first().map(|s| s.as_str()) == Some("whoami.sh")
     {
@@ -86,7 +113,6 @@ fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec
         name
     };
 
-    // Determine effective stdin (may be overridden by `< file`)
     let stdin_bytes: Vec<u8> = cmd
         .redirects
         .iter()
@@ -100,14 +126,30 @@ fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec
         })
         .unwrap_or_else(|| stdin_data.to_vec());
 
-    let mut stdout: Vec<u8> = Vec::new();
-    let mut stderr: Vec<u8> = Vec::new();
+    let has_out_redirect = cmd
+        .redirects
+        .iter()
+        .any(|r| matches!(r, Redirect::Out(_) | Redirect::Append(_)));
+    let has_err_redirect = cmd.redirects.iter().any(|r| matches!(r, Redirect::Err(_)));
+
+    let mut local_out = VecSink::new();
+    let mut local_err = VecSink::new();
 
     let code = {
+        let stdout_target: &mut dyn OutputSink = if has_out_redirect {
+            &mut local_out
+        } else {
+            out_sink
+        };
+        let stderr_target: &mut dyn OutputSink = if has_err_redirect {
+            &mut local_err
+        } else {
+            err_sink
+        };
         let mut io = ShellIo {
             stdin: &stdin_bytes,
-            stdout: &mut stdout,
-            stderr: &mut stderr,
+            stdout: stdout_target,
+            stderr: stderr_target,
         };
         match run_builtin(&name, &args, ctx, &mut io) {
             Some(c) => c,
@@ -118,29 +160,25 @@ fn run_command(cmd: &Command, ctx: &mut Context, stdin_data: &[u8]) -> (i32, Vec
         }
     };
 
-    // Apply stdout redirects (`>` and `>>`)
     for redirect in &cmd.redirects {
         match redirect {
             Redirect::Out(path) => {
                 let full = resolve_path(path, &ctx.env.cwd);
-                let _ = ctx.vfs.write(&full, &stdout);
-                stdout.clear();
+                let _ = ctx.vfs.write(&full, local_out.as_slice());
             }
             Redirect::Append(path) => {
                 let full = resolve_path(path, &ctx.env.cwd);
                 let mut existing = ctx.vfs.read(&full).unwrap_or_default();
-                existing.extend_from_slice(&stdout);
+                existing.extend_from_slice(local_out.as_slice());
                 let _ = ctx.vfs.write(&full, &existing);
-                stdout.clear();
             }
             Redirect::Err(path) => {
                 let full = resolve_path(path, &ctx.env.cwd);
-                let _ = ctx.vfs.write(&full, &stderr);
-                stderr.clear();
+                let _ = ctx.vfs.write(&full, local_err.as_slice());
             }
-            Redirect::In(_) => {} // already handled above
+            Redirect::In(_) => {}
         }
     }
 
-    (code, stdout, stderr)
+    code
 }
