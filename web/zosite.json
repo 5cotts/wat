@@ -1,5 +1,13 @@
 {
   "name": "wat",
   "description": "A POSIX-flavored shell written in Rust that compiles to WebAssembly",
-  "framework": "vite-vanilla"
+  "framework": "vite-vanilla",
+  "local_port": 5173,
+  "entrypoint": "bunx vite --host 0.0.0.0 --port %(ENV_PORT)s",
+  "publish": {
+    "label": "wat",
+    "type": "http",
+    "published_port": 4173,
+    "entrypoint": "bash -c 'bunx vite build && bunx vite preview --host 0.0.0.0 --port %(ENV_PORT)s --strictPort'"
+  }
 }
