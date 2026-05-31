@@ -214,12 +214,15 @@ pub fn expand_word_ctx(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) 
                             push_split(&mut fields, &mut current, &output);
                         }
                     }
-                    // Phase D evaluates this; until then leave it literal (and
-                    // never split, like a quoted value).
-                    SubstKind::Arith => {
-                        let lit: String = chars[i..next].iter().collect();
-                        push_literal(&mut current, &lit);
-                    }
+                    // Arithmetic: evaluate and splice the decimal result (never
+                    // split, like a quoted value). On error, emit a diagnostic
+                    // and substitute nothing.
+                    SubstKind::Arith => match crate::arith::eval_arith(&inner, &ctx.env) {
+                        Ok(v) => push_literal(&mut current, &v.to_string()),
+                        Err(e) => {
+                            err.write(format!("wat: arithmetic: {}\n", e).as_bytes());
+                        }
+                    },
                 }
                 i = next;
                 continue;
