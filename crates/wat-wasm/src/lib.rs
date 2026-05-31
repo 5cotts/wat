@@ -27,6 +27,21 @@ impl Shell {
         self.inner.prompt()
     }
 
+    /// Continuation prompt shown while a multi-line command is still open.
+    pub fn continuation_prompt(&self) -> String {
+        self.inner.continuation_prompt()
+    }
+
+    /// True if `input` is an unfinished multi-line command (open construct or
+    /// unterminated quote/substitution) — the bridge should keep buffering and
+    /// show the continuation prompt instead of feeding it.
+    pub fn is_incomplete(&self, input: &str) -> bool {
+        matches!(
+            self.inner.parse_status(input),
+            wat_core::ParseStatus::Incomplete
+        )
+    }
+
     pub fn feed(&mut self, input: &str) -> String {
         self.inner.feed(input)
     }

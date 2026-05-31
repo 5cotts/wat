@@ -82,6 +82,9 @@ function checkKonami(key: string): boolean {
 
 let bridge: Bridge | null = null;
 let lineBuffer = "";
+// Accumulated earlier lines of a multi-line command (e.g. an open `if`/`for`),
+// joined by newlines. Empty when not composing a continuation.
+let pendingBuffer = "";
 let historyIndex = -1;
 let loadStarted = false;
 
@@ -195,11 +198,20 @@ term.onData((data) => {
     case "\r": {
       // Enter
       term.write("\r\n");
-      const out = bridge.feed(lineBuffer);
+      const full = pendingBuffer ? pendingBuffer + "\n" + lineBuffer : lineBuffer;
+      if (bridge.isIncomplete(full)) {
+        // Unfinished multi-line command: keep buffering, show continuation.
+        pendingBuffer = full;
+        lineBuffer = "";
+        term.write(bridge.continuationPrompt());
+        break;
+      }
+      const out = bridge.feed(full);
       if (out) {
         // Convert \n to \r\n for xterm
         term.write(out.replace(/\n/g, "\r\n"));
       }
+      pendingBuffer = "";
       lineBuffer = "";
       historyIndex = -1;
       writePrompt();
@@ -255,9 +267,10 @@ term.onData((data) => {
       break;
     }
     case "\x03": {
-      // Ctrl+C
+      // Ctrl+C — also discards any in-progress multi-line command.
       term.write("^C\r\n");
       lineBuffer = "";
+      pendingBuffer = "";
       historyIndex = -1;
       writePrompt();
       break;

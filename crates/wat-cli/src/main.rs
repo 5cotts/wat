@@ -46,19 +46,66 @@ fn main() {
 
     // Read one line at a time, releasing the stdin lock before processing so
     // the stdin→master thread inside drive_pty_job can acquire it.
-    loop {
-        let line = {
-            let mut lock = stdin.lock();
-            let mut buf = String::new();
-            match lock.read_line(&mut buf) {
-                Ok(0) | Err(_) => break,
+    'repl: loop {
+        cancel.store(false, Ordering::Relaxed);
+
+        // Accumulate a complete command, reading continuation lines while the
+        // input still parses as incomplete (an open `if`/`for`/`while`/`case`,
+        // an unterminated quote, or an open `$(`). The continuation prompt is
+        // shown between lines; Ctrl-C while composing discards the buffer.
+        let mut buf = String::new();
+        let mut interrupted = false;
+        let line = loop {
+            let mut chunk = String::new();
+            let read = {
+                let mut lock = stdin.lock();
+                lock.read_line(&mut chunk)
+            };
+            match read {
+                Ok(0) => {
+                    // EOF (Ctrl-D): run any trailing partial buffer, else quit.
+                    if buf.is_empty() {
+                        break 'repl;
+                    }
+                    break buf.clone();
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                    interrupted = true;
+                    break String::new();
+                }
+                Err(_) => break 'repl,
                 Ok(_) => {}
             }
-            buf.trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string()
+            let chunk = chunk.trim_end_matches('\n').trim_end_matches('\r');
+            if buf.is_empty() {
+                buf.push_str(chunk);
+            } else {
+                buf.push('\n');
+                buf.push_str(chunk);
+            }
+            // Ctrl-C arriving while composing discards the whole buffer.
+            if cancel.swap(false, Ordering::Relaxed) {
+                interrupted = true;
+                break String::new();
+            }
+            match shell.parse_status(&buf) {
+                wat_core::ParseStatus::Incomplete => {
+                    print!("{}", shell.continuation_prompt());
+                    stdout.lock().flush().unwrap();
+                    continue;
+                }
+                // Complete, or a hard parse error — hand the buffer to the
+                // normal path (which surfaces the error itself).
+                _ => break buf.clone(),
+            }
         };
-        cancel.store(false, Ordering::Relaxed);
+
+        if interrupted {
+            println!("^C");
+            print!("{}", shell.prompt());
+            stdout.lock().flush().unwrap();
+            continue;
+        }
 
         // Print Done notifications for background jobs that finished.
         drain_done_notifications(&shell);
