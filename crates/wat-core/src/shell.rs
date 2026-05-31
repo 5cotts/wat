@@ -94,7 +94,12 @@ impl Shell {
         if pipeline.0.len() != 1 {
             return Err(ProcessError::Unsupported);
         }
-        let cmd = &pipeline.0[0];
+        // Only simple commands are PTY-routed; a compound command (if/for/...)
+        // goes through the buffered eval path.
+        let cmd = match &pipeline.0[0] {
+            crate::ast::Command::Simple(sc) => sc,
+            crate::ast::Command::Compound(_) => return Err(ProcessError::Unsupported),
+        };
         if !cmd.redirects.is_empty() {
             return Err(ProcessError::Unsupported);
         }
@@ -196,7 +201,11 @@ impl Shell {
         if pipeline.0.len() != 1 {
             return false;
         }
-        let cmd = &pipeline.0[0];
+        // Compound commands are never PTY-routed.
+        let cmd = match &pipeline.0[0] {
+            crate::ast::Command::Simple(sc) => sc,
+            crate::ast::Command::Compound(_) => return false,
+        };
         if !cmd.redirects.is_empty() {
             return false;
         }

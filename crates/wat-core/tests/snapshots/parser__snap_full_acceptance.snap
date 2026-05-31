@@ -7,26 +7,30 @@ List(
         (
             Pipeline(
                 [
-                    Command {
-                        assignments: [],
-                        name: "echo",
-                        args: [
-                            "hello world",
-                        ],
-                        redirects: [],
-                    },
-                    Command {
-                        assignments: [],
-                        name: "grep",
-                        args: [
-                            "h",
-                        ],
-                        redirects: [
-                            Out(
-                                "out.txt",
-                            ),
-                        ],
-                    },
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "echo",
+                            args: [
+                                "hello world",
+                            ],
+                            redirects: [],
+                        },
+                    ),
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "grep",
+                            args: [
+                                "h",
+                            ],
+                            redirects: [
+                                Out(
+                                    "out.txt",
+                                ),
+                            ],
+                        },
+                    ),
                 ],
             ),
             And,
@@ -34,14 +38,16 @@ List(
         (
             Pipeline(
                 [
-                    Command {
-                        assignments: [],
-                        name: "cat",
-                        args: [
-                            "out.txt",
-                        ],
-                        redirects: [],
-                    },
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "cat",
+                            args: [
+                                "out.txt",
+                            ],
+                            redirects: [],
+                        },
+                    ),
                 ],
             ),
             End,

@@ -5,4 +5,5 @@ expression: "parse(\"'unterminated\").unwrap_err()"
 ParseError {
     message: "unterminated single quote",
     offset: 0,
+    incomplete: true,
 }

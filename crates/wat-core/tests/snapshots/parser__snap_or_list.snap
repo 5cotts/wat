@@ -7,12 +7,14 @@ List(
         (
             Pipeline(
                 [
-                    Command {
-                        assignments: [],
-                        name: "a",
-                        args: [],
-                        redirects: [],
-                    },
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "a",
+                            args: [],
+                            redirects: [],
+                        },
+                    ),
                 ],
             ),
             Or,
@@ -20,12 +22,14 @@ List(
         (
             Pipeline(
                 [
-                    Command {
-                        assignments: [],
-                        name: "b",
-                        args: [],
-                        redirects: [],
-                    },
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "b",
+                            args: [],
+                            redirects: [],
+                        },
+                    ),
                 ],
             ),
             End,

@@ -7,18 +7,20 @@ List(
         (
             Pipeline(
                 [
-                    Command {
-                        assignments: [],
-                        name: "echo",
-                        args: [
-                            "hi",
-                        ],
-                        redirects: [
-                            Out(
-                                "out.txt",
-                            ),
-                        ],
-                    },
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "echo",
+                            args: [
+                                "hi",
+                            ],
+                            redirects: [
+                                Out(
+                                    "out.txt",
+                                ),
+                            ],
+                        },
+                    ),
                 ],
             ),
             End,
