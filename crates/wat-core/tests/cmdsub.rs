@@ -27,10 +27,11 @@ fn cmdsub_strips_trailing_newlines() {
 }
 
 #[test]
-fn cmdsub_preserves_interior_newline() {
-    // Only *trailing* newlines are stripped; an interior newline survives.
+fn cmdsub_quoted_preserves_interior_newline() {
+    // Quoted: only *trailing* newlines are stripped; an interior newline
+    // survives (no field splitting inside double quotes).
     let mut sh = shell();
-    assert_eq!(feed(&mut sh, "echo [$(echo a; echo b)]"), "[a\nb]\n");
+    assert_eq!(feed(&mut sh, "echo \"[$(echo a; echo b)]\""), "[a\nb]\n");
 }
 
 #[test]
@@ -125,4 +126,77 @@ fn plain_command_unaffected_by_ctx_expansion() {
     assert_eq!(feed(&mut sh, "echo hello world"), "hello world\n");
     assert_eq!(feed(&mut sh, "echo $HOME").trim(), "/home/5cotts");
     assert_eq!(feed(&mut sh, "echo ~").trim(), "/home/5cotts");
+}
+
+// ── Tier 4 / Phase C: field splitting of unquoted substitutions ──────────
+
+#[test]
+fn split_unquoted_collapses_whitespace() {
+    // Unquoted output "a  b" (two spaces) splits into [a, b]; echo rejoins with
+    // a single space — proving the double space was a field separator, not
+    // preserved literal text.
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo $(echo 'a  b')"), "a b\n");
+}
+
+#[test]
+fn quoted_preserves_internal_whitespace() {
+    // Quoted: the same output stays one field, double space intact.
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo \"$(echo 'a  b')\""), "a  b\n");
+}
+
+#[test]
+fn split_into_multiple_fields() {
+    let mut sh = shell();
+    // Three fields; echo joins them with single spaces.
+    assert_eq!(feed(&mut sh, "echo [$(echo a b c)]"), "[a b c]\n");
+}
+
+#[test]
+fn split_unquoted_on_interior_newline() {
+    // Unquoted substitution splits on newlines too (IFS), unlike the quoted
+    // form which preserves them.
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo [$(echo a; echo b)]"), "[a b]\n");
+}
+
+#[test]
+fn split_with_adjacent_literals() {
+    // Literals join the first/last field of the split: x|a b|y -> "xa","by".
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo x$(echo 'a b')y"), "xa by\n");
+}
+
+#[test]
+fn empty_unquoted_sub_contributes_no_field() {
+    // The middle word `$(true)` expands to zero fields, so echo sees two args.
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo a $(true) b"), "a b\n");
+}
+
+#[test]
+fn split_result_is_globbed() {
+    // A split field that is a glob pattern is path-expanded by the caller.
+    // Build the pattern via a file's *contents* (cat) so it isn't globbed by
+    // the inner command — isolating the outer, post-split glob step.
+    let mut sh = shell();
+    feed(&mut sh, "mkdir gd");
+    feed(&mut sh, "cd gd");
+    feed(&mut sh, "echo '*.md' > pat"); // no .md files yet -> literal "*.md"
+    feed(&mut sh, "touch x.md");
+    feed(&mut sh, "touch y.md");
+    let out = feed(&mut sh, "echo $(cat pat)");
+    assert!(
+        out.contains("x.md"),
+        "glob not applied to sub result: {:?}",
+        out
+    );
+    assert!(
+        out.contains("y.md"),
+        "glob not applied to sub result: {:?}",
+        out
+    );
+    // And the raw pattern should be gone (it matched).
+    assert!(!out.contains('*'), "pattern left unexpanded: {:?}", out);
 }
