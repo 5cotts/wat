@@ -2,7 +2,6 @@ use crate::ast::{Command, List, Pipeline, Redirect, Separator};
 use crate::builtins::resolve::resolve_path;
 use crate::builtins::run_builtin;
 use crate::context::Context;
-use crate::expand::expand_word;
 use crate::glob::glob_expand;
 use crate::io::{OutputSink, ShellIo, VecSink};
 #[cfg(feature = "native-proc")]
@@ -53,6 +52,51 @@ pub fn eval(list: &List, ctx: &mut Context) -> (i32, String) {
     let mut combined = out.into_inner();
     combined.extend_from_slice(err.as_slice());
     (code, String::from_utf8_lossy(&combined).into_owned())
+}
+
+/// Evaluate `src` as a command list, capturing its **stdout** as bytes and
+/// returning `(exit_code, stdout)`. Stderr is forwarded to `err` so a
+/// substitution's diagnostics still reach the terminal. Used by command
+/// substitution (`$(...)`, backticks) in `expand::expand_word_ctx`.
+pub fn eval_capture_stdout(
+    src: &str,
+    ctx: &mut Context,
+    err: &mut dyn OutputSink,
+) -> (i32, Vec<u8>) {
+    use crate::parser::parse;
+    match parse(src) {
+        Ok(list) => {
+            let mut out = VecSink::new();
+            let code = eval_streaming(&list, ctx, &mut out, err);
+            (code, out.into_inner())
+        }
+        Err(e) => {
+            err.write(format!("wat: {}\n", e).as_bytes());
+            (2, Vec::new())
+        }
+    }
+}
+
+/// Expand a command's name and arguments on the command path — variable,
+/// tilde, and command substitution — then glob each result. Substitution
+/// stderr is forwarded to `err`. Phase B: each source word yields exactly one
+/// expanded word (no field splitting yet); the name is the first such word.
+fn expand_command_words(
+    cmd: &Command,
+    ctx: &mut Context,
+    err: &mut dyn OutputSink,
+) -> (String, Vec<String>) {
+    let name = crate::expand::expand_word_ctx(&cmd.name, ctx, err)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let mut args = Vec::new();
+    for a in &cmd.args {
+        for w in crate::expand::expand_word_ctx(a, ctx, err) {
+            args.extend(glob_expand(&w, ctx.vfs.as_ref(), &ctx.env.cwd));
+        }
+    }
+    (name, args)
 }
 
 /// Run a pipeline. Single-command pipelines go through the fast path that
@@ -109,16 +153,8 @@ fn eval_pipeline_chained(
         let is_last = idx + 1 == n;
 
         // Resolve name + args once; needed for both builtin lookup and
-        // external spawn.
-        let name = expand_word(&cmd.name, &ctx.env);
-        let args: Vec<String> = cmd
-            .args
-            .iter()
-            .flat_map(|a| {
-                let expanded = expand_word(a, &ctx.env);
-                glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
-            })
-            .collect();
+        // external spawn. Command substitution writes its stderr to final_err.
+        let (name, args) = expand_command_words(cmd, ctx, final_err);
         let name = normalize_easter_egg(&name, &args);
 
         let is_builtin = crate::builtins::is_builtin(&name);
@@ -390,16 +426,7 @@ fn run_command(
     out_sink: &mut dyn OutputSink,
     err_sink: &mut dyn OutputSink,
 ) -> i32 {
-    let name = expand_word(&cmd.name, &ctx.env);
-    let args: Vec<String> = cmd
-        .args
-        .iter()
-        .flat_map(|a| {
-            let expanded = expand_word(a, &ctx.env);
-            glob_expand(&expanded, ctx.vfs.as_ref(), &ctx.env.cwd)
-        })
-        .collect();
-
+    let (name, args) = expand_command_words(cmd, ctx, err_sink);
     let name = normalize_easter_egg(&name, &args);
 
     let stdin_bytes = apply_input_redirect(cmd, ctx, stdin_data.to_vec());

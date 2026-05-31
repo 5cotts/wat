@@ -45,3 +45,12 @@ fn wasm_external_command_falls_back_to_not_found() {
         out
     );
 }
+
+#[wasm_bindgen_test]
+fn wasm_cmdsub_with_builtin() {
+    // Command substitution is pure wat-core, so it works in the browser shell:
+    // an inner builtin runs against the in-memory VFS and its stdout substitutes.
+    let mut shell = Shell::new();
+    let out = shell.feed("echo $(echo hi)");
+    assert_eq!(out, "hi\n");
+}

@@ -75,8 +75,9 @@ impl Shell {
         input: &str,
         dims: crate::pty::PtyDims,
     ) -> Result<Box<dyn crate::pty::PtyChild>, crate::process::ProcessError> {
-        use crate::expand::expand_word;
+        use crate::expand::expand_word_ctx;
         use crate::glob::glob_expand;
+        use crate::io::VecSink;
         use crate::process::{ProcessError, ProcessSpec};
 
         let input = input.trim();
@@ -98,15 +99,24 @@ impl Shell {
             return Err(ProcessError::Unsupported);
         }
 
-        let name = expand_word(&cmd.name, &self.ctx.env);
-        let args: Vec<String> = cmd
-            .args
-            .iter()
-            .flat_map(|a| {
-                let expanded = expand_word(a, &self.ctx.env);
-                glob_expand(&expanded, self.ctx.vfs.as_ref(), &self.ctx.env.cwd)
-            })
-            .collect();
+        // Full expansion incl. command substitution so e.g. `vim $(...)` works
+        // on the PTY path. Substitution stderr is captured to a throwaway sink
+        // here (the PTY path has no stderr stream of its own); a substitution
+        // that fails simply yields empty text. Cloning cmd's words first frees
+        // the borrow on `list` before we take `&mut self.ctx`.
+        let cmd_name = cmd.name.clone();
+        let cmd_args = cmd.args.clone();
+        let mut sink = VecSink::new();
+        let name = expand_word_ctx(&cmd_name, &mut self.ctx, &mut sink)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let mut args: Vec<String> = Vec::new();
+        for a in &cmd_args {
+            for w in expand_word_ctx(a, &mut self.ctx, &mut sink) {
+                args.extend(glob_expand(&w, self.ctx.vfs.as_ref(), &self.ctx.env.cwd));
+            }
+        }
 
         let path = self
             .ctx

@@ -35,6 +35,10 @@ pub struct Context {
     /// Requested background-resume job id, set by the `bg` builtin.
     #[cfg(feature = "native-pty")]
     pub pending_bg: Option<u32>,
+    /// Current command-substitution nesting depth. Guards against runaway
+    /// recursion (`$($($(...)))`) blowing the stack. Not feature-gated:
+    /// command substitution works on every target, including WASM.
+    pub subst_depth: u32,
 }
 
 impl Context {
@@ -58,6 +62,7 @@ impl Context {
             pending_fg: None,
             #[cfg(feature = "native-pty")]
             pending_bg: None,
+            subst_depth: 0,
         }
     }
 
@@ -77,6 +82,7 @@ impl Context {
             pending_fg: None,
             #[cfg(feature = "native-pty")]
             pending_bg: None,
+            subst_depth: 0,
         }
     }
 }
