@@ -169,14 +169,24 @@ fn install_sigchld_handler(jobs: std::sync::Arc<std::sync::Mutex<wat_core::jobs:
 #[cfg(unix)]
 fn decode_wait_status(status: i32) -> wat_core::process::ChildState {
     use wat_core::process::ChildState;
-    if (status & 0x7f) == 0 {
+    let lo = status & 0x7f;
+    if lo == 0 {
+        // WIFEXITED
         ChildState::Exited((status >> 8) & 0xff)
     } else if (status & 0xff) == 0x7f {
+        // WIFSTOPPED
         ChildState::Stopped {
             signum: (status >> 8) & 0xff,
         }
+    } else if lo != 0x7f {
+        // WIFSIGNALED — `lo` is the real terminating signal (1..=126).
+        // Callers encode as 128 + signum.
+        ChildState::Signaled(lo)
     } else {
-        ChildState::Signaled(status & 0x7f) // raw signum; callers encode as 128+signum
+        // WIFCONTINUED (status == 0xffff) — a SIGCONT delivered by `bg`/`fg`.
+        // NOT a termination; must map to Running or it would be misread as
+        // Signaled(127) → Done(255), falsely killing a just-backgrounded job.
+        ChildState::Running
     }
 }
 

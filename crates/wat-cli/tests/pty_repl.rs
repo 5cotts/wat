@@ -607,7 +607,7 @@ fn bg_resumes_stopped_job_in_background() {
         after_stop
     );
 
-    // bg returns immediately.
+    // bg returns immediately and acknowledges by naming the resumed job.
     let bg_start = Instant::now();
     writer.write_all(b"bg\n").expect("write bg");
     let after_bg = read_until(&mut reader, PROMPT_MARKER, deadline());
@@ -617,15 +617,19 @@ fn bg_resumes_stopped_job_in_background() {
         "bg should return quickly, took {:?}",
         bg_elapsed
     );
-    let _ = after_bg; // bg may print "continued" line
+    assert!(
+        after_bg.contains("continued") && after_bg.contains("sleep"),
+        "bg did not acknowledge resuming the job: {:?}",
+        after_bg
+    );
 
-    // jobs should now show Running (or the job may have been done already).
+    // The backgrounded job is `sleep 30`, so it MUST still be Running when we
+    // check — no escape hatch for "maybe it finished".
     writer.write_all(b"jobs\n").expect("write jobs");
     let jobs_out = read_until(&mut reader, PROMPT_MARKER, deadline());
-    // Accept Running or Done (if the sleep ended very quickly on this host)
     assert!(
-        jobs_out.contains("Running") || jobs_out.contains("sleep") || jobs_out.is_empty(),
-        "unexpected jobs output after bg: {:?}",
+        jobs_out.contains("Running") && jobs_out.contains("sleep"),
+        "expected a Running sleep job after bg, got: {:?}",
         jobs_out
     );
 
@@ -642,7 +646,8 @@ fn ampersand_runs_in_background_and_returns_to_prompt() {
 
     read_until(&mut reader, PROMPT_MARKER, deadline());
 
-    // sleep 0.3 & should return to prompt almost immediately.
+    // sleep 0.3 & should return to prompt almost immediately and register a
+    // job (spawn prints `[N] <pid>`).
     let start = Instant::now();
     writer.write_all(b"sleep 0.3 &\n").expect("write bg cmd");
     let after_bg = read_until(&mut reader, PROMPT_MARKER, deadline());
@@ -652,7 +657,11 @@ fn ampersand_runs_in_background_and_returns_to_prompt() {
         "background command took too long ({:?}); should return immediately",
         elapsed
     );
-    let _ = after_bg;
+    assert!(
+        after_bg.contains("[1]"),
+        "expected background job registration '[1] <pid>', got: {:?}",
+        after_bg
+    );
 
     // Type a mid-execution command while sleep is still running.
     writer.write_all(b"echo middle\n").expect("write middle");
@@ -663,7 +672,8 @@ fn ampersand_runs_in_background_and_returns_to_prompt() {
         after_echo
     );
 
-    // After 500ms, sleep 0.3 has finished. Next prompt should show Done.
+    // After 500ms, sleep 0.3 has finished. The next prompt MUST carry the
+    // Done notification — no bare-bracket escape hatch.
     std::thread::sleep(Duration::from_millis(500));
     writer.write_all(b"echo end\n").expect("write end");
     let after_end = read_until(&mut reader, PROMPT_MARKER, deadline());
@@ -673,8 +683,8 @@ fn ampersand_runs_in_background_and_returns_to_prompt() {
         after_end
     );
     assert!(
-        after_end.contains("Done") || after_end.contains('['),
-        "expected Done notification, got: {:?}",
+        after_end.contains("Done"),
+        "expected Done notification for finished bg job, got: {:?}",
         after_end
     );
 
@@ -699,9 +709,11 @@ fn done_notification_uses_exit_status() {
 
     writer.write_all(b"echo poke\n").expect("write poke");
     let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    // The non-zero exit must surface as the exact `Exit 3` phrasing — a bare
+    // "3" would match incidental output and mask a broken exit-status path.
     assert!(
-        after.contains("Exit 3") || after.contains("3"),
-        "expected Exit 3 notification or exit code 3, got: {:?}",
+        after.contains("Exit 3"),
+        "expected 'Exit 3' notification, got: {:?}",
         after
     );
 
