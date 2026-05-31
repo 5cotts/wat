@@ -23,9 +23,9 @@ pub fn eval_streaming(
         ctx.env.last_exit_code = code;
         last_code = code;
 
-        // A pending `break`/`continue`, or an `exit`, stops the rest of this
-        // list so it can propagate up to the enclosing loop / the shell.
-        if ctx.loop_ctl.is_some() || ctx.exit_status.is_some() {
+        // A pending `break`/`continue`, `return`, or `exit` stops the rest of
+        // this list so it can propagate to the enclosing loop / function / shell.
+        if ctx.loop_ctl.is_some() || ctx.returning.is_some() || ctx.exit_status.is_some() {
             break;
         }
 
@@ -121,12 +121,30 @@ fn eval_pipeline(
     final_err: &mut dyn OutputSink,
 ) -> i32 {
     if pipeline.0.len() == 1 {
-        return match &pipeline.0[0] {
-            Command::Simple(sc) => run_command(sc, ctx, initial_stdin, final_out, final_err),
-            Command::Compound(cc) => eval_compound(cc, ctx, final_out, final_err),
-        };
+        return eval_command(&pipeline.0[0], ctx, initial_stdin, final_out, final_err);
     }
     eval_pipeline_chained(pipeline, ctx, initial_stdin, final_out, final_err)
+}
+
+/// Evaluate a single command (simple, compound, or function definition),
+/// outside the multi-segment pipeline machinery.
+fn eval_command(
+    cmd: &Command,
+    ctx: &mut Context,
+    stdin: &[u8],
+    out: &mut dyn OutputSink,
+    err: &mut dyn OutputSink,
+) -> i32 {
+    match cmd {
+        Command::Simple(sc) => run_command(sc, ctx, stdin, out, err),
+        Command::Compound(cc) => eval_compound(cc, ctx, out, err),
+        Command::FunctionDef { name, body } => {
+            ctx.functions
+                .insert(name.clone(), std::rc::Rc::new((**body).clone()));
+            ctx.env.last_exit_code = 0;
+            0
+        }
+    }
 }
 
 /// Evaluate a compound (control-flow) command. Runs in the current shell — no
@@ -157,6 +175,7 @@ fn eval_compound(
         CompoundCommand::While { cond, body } => eval_while(cond, body, false, ctx, out, err),
         CompoundCommand::Until { cond, body } => eval_while(cond, body, true, ctx, out, err),
         CompoundCommand::For { var, words, body } => eval_for(var, words, body, ctx, out, err),
+        CompoundCommand::BraceGroup(body) => eval_streaming(body, ctx, out, err),
         CompoundCommand::Case { word, arms } => {
             // Expand the subject (no field splitting), then run the first arm
             // whose any pattern glob-matches it.
@@ -308,7 +327,9 @@ fn eval_pipeline_chained(
         // builtin. It does not consume the piped stdin (rare; documented).
         let cmd = match command {
             Command::Simple(sc) => sc,
-            Command::Compound(cc) => {
+            // A compound command or function definition as a pipeline segment
+            // runs synchronously and buffers its stdout for the next segment.
+            Command::Compound(_) | Command::FunctionDef { .. } => {
                 let mut buffered_out = VecSink::new();
                 let code = {
                     let stdout_target: &mut dyn OutputSink = if is_last {
@@ -316,7 +337,18 @@ fn eval_pipeline_chained(
                     } else {
                         &mut buffered_out
                     };
-                    eval_compound(cc, ctx, stdout_target, final_err)
+                    let stdin_bytes =
+                        match std::mem::replace(&mut current, PipelineStdin::Bytes(Vec::new())) {
+                            PipelineStdin::Bytes(b) => b,
+                            #[cfg(feature = "native-proc")]
+                            PipelineStdin::Reader(mut r) => {
+                                let mut b = Vec::new();
+                                use std::io::Read as _;
+                                let _ = r.read_to_end(&mut b);
+                                b
+                            }
+                        };
+                    eval_command(command, ctx, &stdin_bytes, stdout_target, final_err)
                 };
                 last_code = code;
                 ctx.env.last_exit_code = code;
@@ -689,6 +721,9 @@ fn run_command(
 
 /// Try builtin first; if it doesn't match, ask the ProcessHost; if that
 /// doesn't resolve either, emit "command not found".
+/// Maximum function-call nesting before refusing to recurse (stack guard).
+const MAX_FN_DEPTH: u32 = 512;
+
 fn run_one(
     name: &str,
     args: &[String],
@@ -697,6 +732,21 @@ fn run_one(
     out_sink: &mut dyn OutputSink,
     err_sink: &mut dyn OutputSink,
 ) -> i32 {
+    // A defined function shadows builtins and externals. Call it with the
+    // arguments swapped in as positional parameters; restore them after.
+    if let Some(body) = ctx.functions.get(name).cloned() {
+        if ctx.fn_depth >= MAX_FN_DEPTH {
+            err_sink.write(b"wat: function recursion too deep\n");
+            return 1;
+        }
+        let saved = std::mem::replace(&mut ctx.env.params, args.to_vec());
+        ctx.fn_depth += 1;
+        let code = eval_command(body.as_ref(), ctx, stdin_bytes, out_sink, err_sink);
+        let ret = ctx.returning.take();
+        ctx.fn_depth -= 1;
+        ctx.env.params = saved;
+        return ret.unwrap_or(code);
+    }
     {
         let mut io = ShellIo {
             stdin: stdin_bytes,

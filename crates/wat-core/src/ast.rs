@@ -23,11 +23,17 @@ pub struct SimpleCommand {
     pub redirects: Vec<Redirect>,
 }
 
-/// A command is either a simple command or a compound control-flow construct.
+/// A command is a simple command, a compound control-flow construct, or a
+/// function definition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Simple(SimpleCommand),
     Compound(CompoundCommand),
+    /// `name() body` / `function name body` — defines a function.
+    FunctionDef {
+        name: String,
+        body: Box<Command>,
+    },
 }
 
 /// A control-flow construct. Bodies are nested [`List`]s, so the AST is a
@@ -52,6 +58,8 @@ pub enum CompoundCommand {
     },
     /// `case word in (pat|pat) body ;; ... esac`.
     Case { word: String, arms: Vec<CaseArm> },
+    /// `{ list; }` — a brace group (runs in the current shell, no subshell).
+    BraceGroup(List),
 }
 
 /// One arm of a `case`: a set of (unexpanded) glob patterns and a body.

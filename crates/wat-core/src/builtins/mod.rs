@@ -35,6 +35,7 @@ pub fn run_builtin<'a>(
         "[" => Some(test_cmd::test_builtin("[", args, ctx, io)),
         "set" => Some(set_builtin(args, ctx, io)),
         "shift" => Some(shift_builtin(args, ctx, io)),
+        "return" => Some(return_builtin(args, ctx, io)),
         // File builtins
         "ls" => Some(ls(args, ctx, io)),
         "cat" => Some(cat(args, ctx, io)),
@@ -99,6 +100,7 @@ pub fn is_builtin(name: &str) -> bool {
             | "["
             | "set"
             | "shift"
+            | "return"
             | "ls"
             | "cat"
             | "mkdir"
@@ -148,6 +150,22 @@ fn set_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     };
     ctx.env.params = operands;
     0
+}
+
+/// `return [n]`: stop the current function with status `n` (default `$?`).
+/// Only meaningful inside a function; elsewhere it's an error.
+fn return_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    if ctx.fn_depth == 0 {
+        io.write_err("wat: return: can only `return' from a function\n");
+        return 1;
+    }
+    let code = args
+        .first()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(ctx.env.last_exit_code);
+    ctx.env.last_exit_code = code;
+    ctx.returning = Some(code);
+    code
 }
 
 /// `shift [n]`: drop the first `n` positional parameters (default 1).

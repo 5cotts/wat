@@ -109,7 +109,9 @@ impl Shell {
         // goes through the buffered eval path.
         let cmd = match &pipeline.0[0] {
             crate::ast::Command::Simple(sc) => sc,
-            crate::ast::Command::Compound(_) => return Err(ProcessError::Unsupported),
+            crate::ast::Command::Compound(_) | crate::ast::Command::FunctionDef { .. } => {
+                return Err(ProcessError::Unsupported)
+            }
         };
         if !cmd.redirects.is_empty() {
             return Err(ProcessError::Unsupported);
@@ -215,7 +217,9 @@ impl Shell {
         // Compound commands are never PTY-routed.
         let cmd = match &pipeline.0[0] {
             crate::ast::Command::Simple(sc) => sc,
-            crate::ast::Command::Compound(_) => return false,
+            crate::ast::Command::Compound(_) | crate::ast::Command::FunctionDef { .. } => {
+                return false
+            }
         };
         if !cmd.redirects.is_empty() {
             return false;
