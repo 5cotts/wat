@@ -1,4 +1,4 @@
-use crate::ast::{Command, List, Pipeline, Redirect, Separator};
+use crate::ast::{Command, List, Pipeline, Redirect, Separator, SimpleCommand};
 use crate::builtins::resolve::resolve_path;
 use crate::builtins::run_builtin;
 use crate::context::Context;
@@ -82,7 +82,7 @@ pub fn eval_capture_stdout(
 /// stderr is forwarded to `err`. Phase B: each source word yields exactly one
 /// expanded word (no field splitting yet); the name is the first such word.
 fn expand_command_words(
-    cmd: &Command,
+    cmd: &SimpleCommand,
     ctx: &mut Context,
     err: &mut dyn OutputSink,
 ) -> (String, Vec<String>) {
@@ -111,7 +111,13 @@ fn eval_pipeline(
     final_err: &mut dyn OutputSink,
 ) -> i32 {
     if pipeline.0.len() == 1 {
-        return run_command(&pipeline.0[0], ctx, initial_stdin, final_out, final_err);
+        return match &pipeline.0[0] {
+            Command::Simple(sc) => run_command(sc, ctx, initial_stdin, final_out, final_err),
+            // Compound commands are produced starting in Phase B.
+            Command::Compound(_) => {
+                unreachable!("compound commands are not yet produced by the parser")
+            }
+        };
     }
     eval_pipeline_chained(pipeline, ctx, initial_stdin, final_out, final_err)
 }
@@ -142,10 +148,12 @@ fn eval_pipeline_chained(
     let saved_assignments: Vec<(String, Option<String>)> = {
         let mut saved = Vec::new();
         for cmd in &pipeline.0 {
-            for (key, raw) in &cmd.assignments {
-                let val = crate::expand::expand_value(raw, ctx, final_err);
-                saved.push((key.clone(), ctx.env.get(key).map(|s| s.to_string())));
-                ctx.env.set(key.clone(), val);
+            if let Command::Simple(sc) = cmd {
+                for (key, raw) in &sc.assignments {
+                    let val = crate::expand::expand_value(raw, ctx, final_err);
+                    saved.push((key.clone(), ctx.env.get(key).map(|s| s.to_string())));
+                    ctx.env.set(key.clone(), val);
+                }
             }
         }
         saved
@@ -165,8 +173,17 @@ fn eval_pipeline_chained(
     #[cfg(feature = "native-proc")]
     let cancel_flag = ctx.cancel.clone();
 
-    for (idx, cmd) in pipeline.0.iter().enumerate() {
+    for (idx, command) in pipeline.0.iter().enumerate() {
         let is_last = idx + 1 == n;
+
+        // Compound commands inside a pipeline land in a later phase; today the
+        // parser only produces simple commands here.
+        let cmd = match command {
+            Command::Simple(sc) => sc,
+            Command::Compound(_) => {
+                unreachable!("compound commands are not yet produced by the parser")
+            }
+        };
 
         // Resolve name + args once; needed for both builtin lookup and
         // external spawn. Command substitution writes its stderr to final_err.
@@ -395,7 +412,7 @@ fn eval_pipeline_chained(
     last_code
 }
 
-fn apply_input_redirect(cmd: &Command, ctx: &Context, fallback: Vec<u8>) -> Vec<u8> {
+fn apply_input_redirect(cmd: &SimpleCommand, ctx: &Context, fallback: Vec<u8>) -> Vec<u8> {
     cmd.redirects
         .iter()
         .find_map(|r| {
@@ -409,7 +426,12 @@ fn apply_input_redirect(cmd: &Command, ctx: &Context, fallback: Vec<u8>) -> Vec<
         .unwrap_or(fallback)
 }
 
-fn apply_output_redirects(cmd: &Command, ctx: &mut Context, out_bytes: &[u8], err_bytes: &[u8]) {
+fn apply_output_redirects(
+    cmd: &SimpleCommand,
+    ctx: &mut Context,
+    out_bytes: &[u8],
+    err_bytes: &[u8],
+) {
     for redirect in &cmd.redirects {
         match redirect {
             Redirect::Out(path) => {
@@ -443,7 +465,7 @@ fn normalize_easter_egg(name: &str, args: &[String]) -> String {
 /// sinks. If the command has any output redirects, output is buffered locally
 /// so it can be routed to the VFS instead of the outer sinks.
 fn run_command(
-    cmd: &Command,
+    cmd: &SimpleCommand,
     ctx: &mut Context,
     stdin_data: &[u8],
     out_sink: &mut dyn OutputSink,

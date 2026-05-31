@@ -5,4 +5,5 @@ expression: "parse(\">\").unwrap_err()"
 ParseError {
     message: "expected filename after '>'",
     offset: 1,
+    incomplete: false,
 }

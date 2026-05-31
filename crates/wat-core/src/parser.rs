@@ -1,11 +1,15 @@
-use crate::ast::{Command, List, Pipeline, Redirect, Separator};
+use crate::ast::{Command, List, Pipeline, Redirect, Separator, SimpleCommand};
 use crate::lexer::{lex, LexError, Spanned, Token};
 
-/// A parse error with a byte offset and human-readable message.
+/// A parse error with a byte offset and human-readable message. `incomplete`
+/// is true when the parser reached end-of-input while still expecting more
+/// (an open construct or unterminated quote/substitution) — the REPL uses it
+/// to keep reading continuation lines rather than report an error.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     pub message: String,
     pub offset: usize,
+    pub incomplete: bool,
 }
 
 impl std::fmt::Display for ParseError {
@@ -16,9 +20,12 @@ impl std::fmt::Display for ParseError {
 
 impl From<LexError> for ParseError {
     fn from(e: LexError) -> Self {
+        // Unterminated quotes / substitutions mean "need more input".
+        let incomplete = e.message.contains("unterminated");
         ParseError {
             message: e.message,
             offset: e.offset,
+            incomplete,
         }
     }
 }
@@ -96,6 +103,7 @@ impl Parser {
                     return Err(ParseError {
                         message: format!("unexpected token '{}'", other.display()),
                         offset: self.offset(),
+                        incomplete: false,
                     })
                 }
             };
@@ -122,7 +130,14 @@ impl Parser {
         Ok(Pipeline(commands))
     }
 
+    /// Parse one command. For now every command is a simple command; Phase B+
+    /// will dispatch to compound-command parsers when a control-flow keyword
+    /// appears in command position.
     fn parse_command(&mut self) -> Result<Command, ParseError> {
+        Ok(Command::Simple(self.parse_simple_command()?))
+    }
+
+    fn parse_simple_command(&mut self) -> Result<SimpleCommand, ParseError> {
         // Collect words and redirects; first word is the command name.
         let mut words: Vec<String> = Vec::new();
         let mut redirects: Vec<Redirect> = Vec::new();
@@ -166,6 +181,7 @@ impl Parser {
             return Err(ParseError {
                 message: "expected a command".to_string(),
                 offset: self.offset(),
+                incomplete: false,
             });
         }
 
@@ -189,7 +205,7 @@ impl Parser {
         let name = rest.next().unwrap_or_default();
         let args: Vec<String> = rest.collect();
 
-        Ok(Command {
+        Ok(SimpleCommand {
             assignments,
             name,
             args,
@@ -207,6 +223,7 @@ impl Parser {
             _ => Err(ParseError {
                 message: msg.to_string(),
                 offset,
+                incomplete: false,
             }),
         }
     }
@@ -235,22 +252,29 @@ mod tests {
     use super::*;
     use crate::ast::*;
 
+    fn simple(c: &Command) -> &SimpleCommand {
+        match c {
+            Command::Simple(sc) => sc,
+            Command::Compound(_) => panic!("expected a simple command"),
+        }
+    }
+
     fn cmd(name: &str, args: &[&str]) -> Command {
-        Command {
+        Command::Simple(SimpleCommand {
             assignments: vec![],
             name: name.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             redirects: vec![],
-        }
+        })
     }
 
     fn cmd_r(name: &str, args: &[&str], redirects: Vec<Redirect>) -> Command {
-        Command {
+        Command::Simple(SimpleCommand {
             assignments: vec![],
             name: name.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             redirects,
-        }
+        })
     }
 
     #[test]
@@ -265,7 +289,7 @@ mod tests {
     #[test]
     fn assignment_prefix_before_command() {
         let list = parse("x=5 echo hi").unwrap();
-        let c = &list.0[0].0 .0[0];
+        let c = simple(&list.0[0].0 .0[0]);
         assert_eq!(c.assignments, vec![("x".to_string(), "5".to_string())]);
         assert_eq!(c.name, "echo");
         assert_eq!(c.args, vec!["hi".to_string()]);
@@ -274,7 +298,7 @@ mod tests {
     #[test]
     fn pure_assignment_has_empty_name() {
         let list = parse("foo=bar").unwrap();
-        let c = &list.0[0].0 .0[0];
+        let c = simple(&list.0[0].0 .0[0]);
         assert_eq!(c.assignments, vec![("foo".to_string(), "bar".to_string())]);
         assert_eq!(c.name, "");
         assert!(c.args.is_empty());
@@ -283,7 +307,7 @@ mod tests {
     #[test]
     fn multiple_assignments() {
         let list = parse("a=1 b=2 cmd").unwrap();
-        let c = &list.0[0].0 .0[0];
+        let c = simple(&list.0[0].0 .0[0]);
         assert_eq!(
             c.assignments,
             vec![
@@ -298,7 +322,7 @@ mod tests {
     fn assignment_looking_arg_after_name_is_arg() {
         // `x=5` after the command name is a normal argument, not an assignment.
         let list = parse("echo x=5").unwrap();
-        let c = &list.0[0].0 .0[0];
+        let c = simple(&list.0[0].0 .0[0]);
         assert!(c.assignments.is_empty());
         assert_eq!(c.name, "echo");
         assert_eq!(c.args, vec!["x=5".to_string()]);
@@ -307,7 +331,7 @@ mod tests {
     #[test]
     fn value_with_equals_and_empty() {
         let list = parse("PATH=/a:/b=c x=").unwrap();
-        let c = &list.0[0].0 .0[0];
+        let c = simple(&list.0[0].0 .0[0]);
         assert_eq!(
             c.assignments,
             vec![
@@ -322,7 +346,7 @@ mod tests {
     fn non_identifier_is_not_assignment() {
         // Leading `$` makes it not a NAME=value assignment word → it's the name.
         let list = parse("1abc=5").unwrap();
-        let c = &list.0[0].0 .0[0];
+        let c = simple(&list.0[0].0 .0[0]);
         assert!(c.assignments.is_empty());
         assert_eq!(c.name, "1abc=5");
     }
@@ -361,21 +385,21 @@ mod tests {
     #[test]
     fn redirect_out() {
         let list = parse("echo hi > out.txt").unwrap();
-        let cmd = &list.0[0].0 .0[0];
+        let cmd = simple(&list.0[0].0 .0[0]);
         assert_eq!(cmd.redirects, vec![Redirect::Out("out.txt".into())]);
     }
 
     #[test]
     fn redirect_append() {
         let list = parse("echo hi >> out.txt").unwrap();
-        let cmd = &list.0[0].0 .0[0];
+        let cmd = simple(&list.0[0].0 .0[0]);
         assert_eq!(cmd.redirects, vec![Redirect::Append("out.txt".into())]);
     }
 
     #[test]
     fn redirect_in() {
         let list = parse("cat < in.txt").unwrap();
-        let cmd = &list.0[0].0 .0[0];
+        let cmd = simple(&list.0[0].0 .0[0]);
         assert_eq!(cmd.redirects, vec![Redirect::In("in.txt".into())]);
     }
 
@@ -419,7 +443,7 @@ mod tests {
     #[test]
     fn multiple_redirects() {
         let list = parse("cmd < in.txt > out.txt").unwrap();
-        let cmd = &list.0[0].0 .0[0];
+        let cmd = simple(&list.0[0].0 .0[0]);
         assert_eq!(
             cmd.redirects,
             vec![

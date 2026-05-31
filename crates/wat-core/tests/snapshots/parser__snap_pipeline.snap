@@ -7,20 +7,24 @@ List(
         (
             Pipeline(
                 [
-                    Command {
-                        assignments: [],
-                        name: "ls",
-                        args: [],
-                        redirects: [],
-                    },
-                    Command {
-                        assignments: [],
-                        name: "grep",
-                        args: [
-                            "foo",
-                        ],
-                        redirects: [],
-                    },
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "ls",
+                            args: [],
+                            redirects: [],
+                        },
+                    ),
+                    Simple(
+                        SimpleCommand {
+                            assignments: [],
+                            name: "grep",
+                            args: [
+                                "foo",
+                            ],
+                            redirects: [],
+                        },
+                    ),
                 ],
             ),
             End,
