@@ -85,6 +85,18 @@ fn main() {
         if shell.exit_requested {
             std::process::exit(shell.last_exit_code());
         }
+
+        // Check pending_fg/bg set by builtins (fg/bg) during THIS command.
+        if let Some(id) = shell.ctx.pending_fg.take() {
+            let exit = resume_fg(&mut shell, id);
+            shell.set_last_exit_code(exit);
+            if shell.exit_requested {
+                std::process::exit(shell.last_exit_code());
+            }
+        } else if let Some(id) = shell.ctx.pending_bg.take() {
+            bg_job(&shell, id);
+        }
+
         print!("{}", shell.prompt());
         stdout.lock().flush().unwrap();
     }
@@ -185,7 +197,6 @@ fn resume_fg(shell: &mut Shell, id: u32) -> i32 {
     let child_arc = Arc::new(Mutex::new(pty.child));
     let cancel_pipe = CancelPipe::new();
     let (exit, stopped, child_arc) = drive_pty_job(reader, writer, child_arc, &cmd, &cancel_pipe);
-    cancel_pipe.cancel(); // stop stdin→master thread
 
     if stopped {
         register_stopped_job(shell, child_arc, pgid, cmd);
@@ -346,9 +357,6 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
     let cancel_pipe = CancelPipe::new();
 
     let (exit, stopped, child_arc) = drive_pty_job(reader, writer, child_arc, input, &cancel_pipe);
-    // Signal the stdin→master thread to stop so it doesn't race with the REPL
-    // for stdin bytes on the next command.
-    cancel_pipe.cancel();
 
     if stopped {
         let pid = child_arc.lock().expect("child").pid().unwrap_or(0);
@@ -405,7 +413,7 @@ fn drive_pty_job(
     // lock so the REPL can re-acquire stdin after the drive loop exits.
     #[cfg(unix)]
     let cancel_read_fd = cancel.read_fd();
-    std::thread::spawn(move || {
+    let stdin_thread = std::thread::spawn(move || {
         let mut writer = writer;
         let mut buf = [0u8; 1024];
         loop {
@@ -544,6 +552,11 @@ fn drive_pty_job(
     {
         let _ = (winch_handle, winch_thread);
     }
+
+    // Signal the stdin→master thread to stop and wait for it to exit.
+    // This ensures no raw fd 0 reads race with the REPL's next stdin.lock().
+    cancel.cancel();
+    let _ = stdin_thread.join();
 
     (exit_code, stopped, child)
 }

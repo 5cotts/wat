@@ -4,6 +4,8 @@ use crate::io::ShellIo;
 use crate::vfs::FileType;
 
 pub mod easter;
+#[cfg(feature = "native-pty")]
+pub mod jobs_builtins;
 pub mod resolve;
 
 /// Run a builtin. Returns `Some(exit_code)` if known, `None` if not a builtin.
@@ -44,6 +46,13 @@ pub fn run_builtin<'a>(
         "tr" => Some(tr(args, io)),
         "cut" => Some(cut(args, io)),
         "history" => Some(history_builtin(ctx, io)),
+        // Job control builtins (native-pty only)
+        #[cfg(feature = "native-pty")]
+        "jobs" => Some(jobs_builtins::jobs_builtin(ctx, io)),
+        #[cfg(feature = "native-pty")]
+        "fg" => Some(jobs_builtins::fg_builtin(args, ctx, io)),
+        #[cfg(feature = "native-pty")]
+        "bg" => Some(jobs_builtins::bg_builtin(args, ctx, io)),
         // Easter eggs
         "sudo" => Some(easter::sudo(io)),
         "vim" | "vi" | "nano" | "emacs" => Some(easter::editor_trap(name, io)),
@@ -58,6 +67,10 @@ pub fn run_builtin<'a>(
 /// executor to decide between the synchronous builtin path and the
 /// process-spawning external path.
 pub fn is_builtin(name: &str) -> bool {
+    #[cfg(feature = "native-pty")]
+    if matches!(name, "jobs" | "fg" | "bg") {
+        return true;
+    }
     matches!(
         name,
         "echo"

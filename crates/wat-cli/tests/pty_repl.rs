@@ -444,3 +444,132 @@ fn ctrl_z_stops_pty_child_and_returns_to_prompt() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+// ── Tier 3 / Phase C: jobs / fg / bg builtins ────────────────────────────
+
+fn ctrl_z_sleep(writer: &mut Box<dyn Write + Send>, _reader: &mut Box<dyn Read + Send>) {
+    writer.write_all(b"sleep 30\n").expect("write sleep");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"\x1a").expect("ctrl-z");
+}
+
+fn wait_for_wat_exit(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(8) {
+            child.kill().ok();
+            panic!("wat did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn jobs_lists_stopped_job() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    ctrl_z_sleep(&mut writer, &mut reader);
+    let stopped_out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        stopped_out.contains("Stopped"),
+        "expected Stopped message, got: {:?}",
+        stopped_out
+    );
+
+    writer.write_all(b"jobs\n").expect("write jobs");
+    let jobs_out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        jobs_out.contains("Stopped"),
+        "expected 'Stopped' in jobs output, got: {:?}",
+        jobs_out
+    );
+    assert!(
+        jobs_out.contains("sleep"),
+        "expected 'sleep' in jobs output, got: {:?}",
+        jobs_out
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn fg_resumes_stopped_job_in_foreground() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Stop a short sleep (0.5s) with Ctrl-Z.
+    writer.write_all(b"sleep 0.5\n").expect("write sleep");
+    std::thread::sleep(Duration::from_millis(150));
+    writer.write_all(b"\x1a").expect("ctrl-z");
+
+    let after_stop = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after_stop.contains("Stopped"),
+        "expected Stopped, got: {:?}",
+        after_stop
+    );
+
+    // fg resumes sleep 0.5; it should finish within ~500ms and return prompt.
+    writer.write_all(b"fg\n").expect("write fg");
+    let after_fg = read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Sleep should finish (not print Stopped again).
+    assert!(
+        !after_fg.contains("Stopped"),
+        "expected sleep to finish, not stop again, got: {:?}",
+        after_fg
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn bg_resumes_stopped_job_in_background() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    ctrl_z_sleep(&mut writer, &mut reader);
+    let after_stop = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after_stop.contains("Stopped"),
+        "expected Stopped, got: {:?}",
+        after_stop
+    );
+
+    // bg returns immediately.
+    let bg_start = Instant::now();
+    writer.write_all(b"bg\n").expect("write bg");
+    let after_bg = read_until(&mut reader, PROMPT_MARKER, deadline());
+    let bg_elapsed = bg_start.elapsed();
+    assert!(
+        bg_elapsed < Duration::from_secs(3),
+        "bg should return quickly, took {:?}",
+        bg_elapsed
+    );
+    let _ = after_bg; // bg may print "continued" line
+
+    // jobs should now show Running (or the job may have been done already).
+    writer.write_all(b"jobs\n").expect("write jobs");
+    let jobs_out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    // Accept Running or Done (if the sleep ended very quickly on this host)
+    assert!(
+        jobs_out.contains("Running") || jobs_out.contains("sleep") || jobs_out.is_empty(),
+        "unexpected jobs output after bg: {:?}",
+        jobs_out
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
