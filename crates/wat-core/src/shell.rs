@@ -157,6 +157,7 @@ impl Shell {
     /// 5. The command name resolves on PATH via `process_host.lookup`.
     #[cfg(feature = "native-pty")]
     pub fn pty_eligible(&self, input: &str) -> bool {
+        use crate::ast::Separator;
         use crate::expand::expand_word;
 
         let trimmed = input.trim();
@@ -169,7 +170,11 @@ impl Shell {
         if list.0.len() != 1 {
             return false;
         }
-        let (pipeline, _sep) = &list.0[0];
+        let (pipeline, sep) = &list.0[0];
+        // Allow single-command foreground (End) or background (Background).
+        if !matches!(sep, Separator::End | Separator::Background) {
+            return false;
+        }
         if pipeline.0.len() != 1 {
             return false;
         }
@@ -182,6 +187,20 @@ impl Shell {
             return false;
         }
         self.ctx.process_host.lookup(&name).is_some()
+    }
+
+    /// Returns true if `input` is a background command (`cmd &`).
+    #[cfg(feature = "native-pty")]
+    pub fn is_background_cmd(&self, input: &str) -> bool {
+        use crate::ast::Separator;
+        let trimmed = input.trim();
+        let Ok(list) = parse(trimmed) else {
+            return false;
+        };
+        list.0
+            .first()
+            .map(|(_, sep)| *sep == Separator::Background)
+            .unwrap_or(false)
     }
 
     pub fn prompt(&self) -> String {

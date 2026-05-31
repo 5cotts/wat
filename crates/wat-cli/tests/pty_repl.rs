@@ -573,3 +573,79 @@ fn bg_resumes_stopped_job_in_background() {
     writer.write_all(b"exit\n").expect("exit");
     wait_for_wat_exit(child);
 }
+
+// ── Tier 3 / Phase D: & background spawn + Done notifications ────────────
+
+#[test]
+fn ampersand_runs_in_background_and_returns_to_prompt() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // sleep 0.3 & should return to prompt almost immediately.
+    let start = Instant::now();
+    writer.write_all(b"sleep 0.3 &\n").expect("write bg cmd");
+    let after_bg = read_until(&mut reader, PROMPT_MARKER, deadline());
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "background command took too long ({:?}); should return immediately",
+        elapsed
+    );
+    let _ = after_bg;
+
+    // Type a mid-execution command while sleep is still running.
+    writer.write_all(b"echo middle\n").expect("write middle");
+    let after_echo = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after_echo.contains("middle"),
+        "expected 'middle' in output, got: {:?}",
+        after_echo
+    );
+
+    // After 500ms, sleep 0.3 has finished. Next prompt should show Done.
+    std::thread::sleep(Duration::from_millis(500));
+    writer.write_all(b"echo end\n").expect("write end");
+    let after_end = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after_end.contains("end"),
+        "expected 'end' in output, got: {:?}",
+        after_end
+    );
+    assert!(
+        after_end.contains("Done") || after_end.contains('['),
+        "expected Done notification, got: {:?}",
+        after_end
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn done_notification_uses_exit_status() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer
+        .write_all(b"python3 -c 'import sys; sys.exit(3)' &\n")
+        .expect("write bg py");
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Give python time to finish.
+    std::thread::sleep(Duration::from_millis(500));
+
+    writer.write_all(b"echo poke\n").expect("write poke");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains("Exit 3") || after.contains("3"),
+        "expected Exit 3 notification or exit code 3, got: {:?}",
+        after
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}

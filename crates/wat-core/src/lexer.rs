@@ -19,6 +19,8 @@ pub enum Token {
     Semicolon,
     /// `&&`
     And,
+    /// `&`
+    Background,
     /// `||`
     Or,
     /// `\n`
@@ -39,6 +41,7 @@ impl Token {
             Token::RedirectAppend => ">>",
             Token::Semicolon => ";",
             Token::And => "&&",
+            Token::Background => "&",
             Token::Or => "||",
             Token::Newline => "\n",
             Token::Eof => "",
@@ -131,9 +134,8 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     });
                     i += 2;
                 } else {
-                    // Lone `&` — treat as word for now (background jobs not supported)
                     tokens.push(Spanned {
-                        token: Token::Word("&".to_string()),
+                        token: Token::Background,
                         offset,
                     });
                     i += 1;

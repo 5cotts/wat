@@ -81,6 +81,11 @@ impl Parser {
                     self.skip_newlines();
                     Separator::Or
                 }
+                Token::Background => {
+                    self.advance();
+                    self.skip_newlines();
+                    Separator::Background
+                }
                 Token::Newline => {
                     self.advance();
                     self.skip_newlines();
