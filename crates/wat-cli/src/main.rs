@@ -39,6 +39,11 @@ fn main() {
     print!("{}", shell.prompt());
     stdout.lock().flush().unwrap();
 
+    // Tracks whether we've already warned about stopped jobs on a prior `exit`.
+    // Like bash: the first `exit` with stopped jobs warns and is cancelled; a
+    // second consecutive `exit` proceeds. Running any other command resets it.
+    let mut warned_stopped = false;
+
     // Read one line at a time, releasing the stdin lock before processing so
     // the stdin→master thread inside drive_pty_job can acquire it.
     loop {
@@ -92,8 +97,21 @@ fn main() {
             }
         }
         if shell.exit_requested {
+            if has_stopped_jobs(&shell) && !warned_stopped {
+                eprintln!("wat: You have stopped jobs.");
+                warned_stopped = true;
+                shell.exit_requested = false;
+                print!("{}", shell.prompt());
+                stdout.lock().flush().unwrap();
+                continue;
+            }
+            // Proceeding to exit: SIGHUP + SIGCONT any stopped jobs so they
+            // don't linger as suspended zombies after the shell is gone.
+            hangup_stopped_jobs(&shell);
             std::process::exit(shell.last_exit_code());
         }
+        // Any non-exit command resets the stopped-jobs warning.
+        warned_stopped = false;
 
         // Check pending_fg/bg set by builtins (fg/bg) during THIS command.
         if let Some(id) = shell.ctx.pending_fg.take() {
@@ -125,10 +143,12 @@ fn install_sigchld_handler(jobs: std::sync::Arc<std::sync::Mutex<wat_core::jobs:
     std::thread::spawn(move || {
         for _sig in signals.forever() {
             let mut table = jobs.lock().expect("job table");
-            // Collect the pids of Running background jobs to check.
+            // Poll Running and Stopped jobs. Stopped jobs are included so that
+            // a `kill -9 %N` (or kill -STOP/-CONT) on a stopped job is observed
+            // and the table updated; an already-reported stop just returns 0.
             let job_pids: Vec<(u32, i32)> = table
                 .iter()
-                .filter(|j| matches!(j.state, JobState::Running))
+                .filter(|j| matches!(j.state, JobState::Running | JobState::Stopped))
                 .filter_map(|j| {
                     let pid = j.pty.as_ref()?.child.pid()?;
                     Some((j.id, pid))
@@ -243,6 +263,39 @@ fn drain_done_notifications(shell: &Shell) {
         }
     }
 }
+
+/// True if any job in the table is currently Stopped.
+fn has_stopped_jobs(shell: &Shell) -> bool {
+    use wat_core::jobs::JobState;
+    let jobs_arc = shell.jobs();
+    let table = jobs_arc.lock().expect("job table");
+    let any = table.iter().any(|j| matches!(j.state, JobState::Stopped));
+    any
+}
+
+/// On exit, send SIGHUP + SIGCONT to every stopped job's process group so a
+/// suspended child doesn't linger after the shell is gone (SIGHUP alone is
+/// queued while stopped; SIGCONT lets it be delivered).
+#[cfg(unix)]
+fn hangup_stopped_jobs(shell: &Shell) {
+    use wat_core::jobs::JobState;
+    let jobs_arc = shell.jobs();
+    let table = jobs_arc.lock().expect("job table");
+    for job in table.iter() {
+        if matches!(job.state, JobState::Stopped) {
+            unsafe {
+                extern "C" {
+                    fn kill(pid: i32, sig: i32) -> i32;
+                }
+                kill(-(job.pgid), 1); // SIGHUP
+                kill(-(job.pgid), 18); // SIGCONT
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn hangup_stopped_jobs(_shell: &Shell) {}
 
 /// Send SIGCONT to a stopped job without re-entering the drive loop.
 fn bg_job(shell: &Shell, id: u32) {

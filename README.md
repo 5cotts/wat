@@ -10,7 +10,8 @@ cancellation. Interactive foreground commands (`vim`, `less`, `htop`,
 `python3`, `man`, etc.) run inside a real pseudo-terminal so full-screen
 TUIs and line-editing work the same as in `bash` / `zsh`. Terminal
 resizes propagate to the child via SIGWINCH. Job control — `Ctrl-Z`,
-`jobs`, `fg`, `bg`, and `cmd &` — works for PTY-routed single commands.
+`jobs`, `fg`, `bg`, `kill %n`, and `cmd &` — works for PTY-routed single
+commands.
 
 It is **not** a login-shell replacement — see
 [Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
@@ -233,8 +234,10 @@ implement:
 - **Startup files, aliases, completion for external commands, here-docs,
   functions, arrays, arithmetic expansion, `set -o` flags.** Not in scope.
 
-Job control (`Ctrl-Z`, `fg`, `bg`, `jobs`, `cmd &`) is implemented for
-PTY-routed single commands. See "Known limitations" below.
+Job control (`Ctrl-Z`, `fg`, `bg`, `jobs`, `kill %n`, `cmd &`) is
+implemented for PTY-routed single commands. Exiting with stopped jobs
+warns once (like bash) and SIGHUPs them on the second `exit`. See "Known
+limitations" below.
 
 Treat it as a credible *scratch* shell — fun to drive on purpose, not a
 replacement for `zsh`.
@@ -267,11 +270,17 @@ the stopped job in a `JobTable`, and prints `[N]+ Stopped <cmd>` before
 returning to the REPL prompt.
 
 `fg` sends SIGCONT to the job's process group and re-enters the PTY drive
-loop. `bg` sends SIGCONT without re-entering. Background jobs (`cmd &`)
-skip the drive loop entirely; a SIGCHLD handler polls each background job's
-specific PID (not `waitpid(-1)`, which would race the foreground loop) and
-marks them `Done` when they exit. `Done` notifications appear at the top of
-the next REPL prompt.
+loop. `bg` sends SIGCONT without re-entering. `kill [-SIG] %n` signals a
+job's whole process group (`kill <pid>` targets a raw pid). Background jobs
+(`cmd &`) skip the drive loop entirely; a SIGCHLD handler polls each
+Running/Stopped job's specific PID (not `waitpid(-1)`, which would race the
+foreground loop) and updates the table, mapping `WIFCONTINUED` to Running so
+a `bg`/`fg` SIGCONT isn't misread as a kill. `Done`/`Exit` notifications
+appear at the top of the next REPL prompt.
+
+Typing `exit` while jobs are stopped warns `You have stopped jobs.` and is
+cancelled; a second consecutive `exit` proceeds, sending SIGHUP+SIGCONT to
+the stopped groups so they don't linger suspended after the shell exits.
 
 ### How PTY routing works
 
