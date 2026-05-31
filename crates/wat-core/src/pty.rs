@@ -41,6 +41,13 @@ pub trait PtyChild: Send {
     /// stopped job is resumed via `fg` — the original reader is in a blocked
     /// background thread; this produces a fresh one from the same master fd.
     fn clone_reader(&mut self) -> io::Result<Box<dyn io::Read + Send>>;
+    /// Produce a fresh writer to the master. `portable-pty`'s `take_writer`
+    /// is one-shot, so this dups the master fd instead — needed so `fg` can
+    /// re-drive a job whose original writer was consumed by the first run.
+    fn clone_writer(&mut self) -> io::Result<Box<dyn io::Write + Send>>;
+    /// The master's raw fd, for `poll`-based cancellation of the reader
+    /// thread. `None` on platforms without a backing fd.
+    fn master_fd(&self) -> Option<i32>;
 }
 
 /// Host abstraction for launching commands inside a PTY. Separate from
@@ -270,6 +277,46 @@ mod native {
                 .try_clone_reader()
                 .map_err(|e| io::Error::other(e.to_string()))
         }
+
+        #[cfg(unix)]
+        fn clone_writer(&mut self) -> io::Result<Box<dyn io::Write + Send>> {
+            use std::os::unix::io::FromRawFd;
+            let raw = self
+                .master
+                .lock()
+                .expect("master mutex poisoned")
+                .as_raw_fd()
+                .ok_or_else(|| io::Error::other("master has no raw fd"))?;
+            // Dup so dropping the returned writer closes only the dup, not the
+            // master itself (which would send EOF to the slave).
+            let dup = unsafe { libc_dup(raw) };
+            if dup < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `dup` is a fresh, owned fd from dup(2).
+            Ok(Box::new(unsafe { std::fs::File::from_raw_fd(dup) }))
+        }
+
+        #[cfg(not(unix))]
+        fn clone_writer(&mut self) -> io::Result<Box<dyn io::Write + Send>> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "clone_writer not supported on this platform",
+            ))
+        }
+
+        #[cfg(unix)]
+        fn master_fd(&self) -> Option<i32> {
+            self.master
+                .lock()
+                .expect("master mutex poisoned")
+                .as_raw_fd()
+        }
+
+        #[cfg(not(unix))]
+        fn master_fd(&self) -> Option<i32> {
+            None
+        }
     }
 
     // Status word decoding (POSIX, Linux/macOS compatible)
@@ -300,6 +347,9 @@ mod native {
 
         #[link_name = "waitpid"]
         fn libc_waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+
+        #[link_name = "dup"]
+        fn libc_dup(fd: i32) -> i32;
     }
 }
 
