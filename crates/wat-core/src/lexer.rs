@@ -27,6 +27,11 @@ pub enum Token {
     Or,
     /// `\n`
     Newline,
+    /// A here-document body, already collected by the lexer. The `bool` is
+    /// whether the body should be expanded (`false` for a quoted delimiter).
+    HereDoc(String, bool),
+    /// The `<<<` here-string operator; the following word is its content.
+    HereStringOp,
     /// End of input.
     Eof,
 }
@@ -47,6 +52,8 @@ impl Token {
             Token::Background => "&",
             Token::Or => "||",
             Token::Newline => "\n",
+            Token::HereDoc(_, _) => "<<",
+            Token::HereStringOp => "<<<",
             Token::Eof => "",
             Token::Word(s) => s.as_str(),
         }
@@ -87,6 +94,10 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
+    // Here-docs awaiting their bodies: (index of the placeholder HereDoc token,
+    // delimiter, strip-leading-tabs). Filled when the terminating newline of the
+    // line that introduced them is reached.
+    let mut pending: Vec<(usize, String, bool)> = Vec::new();
 
     // Byte offset tracking (chars may be multi-byte).
     let byte_offsets: Vec<usize> = {
@@ -121,6 +132,16 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     offset,
                 });
                 i += 1;
+                // The line that opened any here-docs has ended: collect each
+                // body (in order) from the following lines.
+                if !pending.is_empty() {
+                    for (idx, delim, strip) in std::mem::take(&mut pending) {
+                        let body = collect_heredoc_body(&chars, &mut i, &delim, strip)?;
+                        if let Token::HereDoc(ref mut b, _) = tokens[idx].token {
+                            *b = body;
+                        }
+                    }
+                }
             }
             '|' => {
                 if i + 1 < chars.len() && chars[i + 1] == '|' {
@@ -168,11 +189,36 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 }
             }
             '<' => {
-                tokens.push(Spanned {
-                    token: Token::RedirectIn,
-                    offset,
-                });
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '<' {
+                    if i + 2 < chars.len() && chars[i + 2] == '<' {
+                        // `<<<` here-string: the following word is the content.
+                        i += 3;
+                        tokens.push(Spanned {
+                            token: Token::HereStringOp,
+                            offset,
+                        });
+                    } else {
+                        // `<<` / `<<-` here-document.
+                        let strip = i + 2 < chars.len() && chars[i + 2] == '-';
+                        i += if strip { 3 } else { 2 };
+                        while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
+                            i += 1;
+                        }
+                        let (delim, expand) = read_heredoc_delim(&chars, &mut i)?;
+                        let idx = tokens.len();
+                        tokens.push(Spanned {
+                            token: Token::HereDoc(String::new(), expand),
+                            offset,
+                        });
+                        pending.push((idx, delim, strip));
+                    }
+                } else {
+                    tokens.push(Spanned {
+                        token: Token::RedirectIn,
+                        offset,
+                    });
+                    i += 1;
+                }
             }
             ';' => {
                 // `;;` is the case-arm terminator (one token); `;` separates.
@@ -316,11 +362,100 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
         }
     }
 
+    // A here-doc whose body never arrived (no terminating newline yet) leaves
+    // the command unterminated → the REPL keeps reading.
+    if !pending.is_empty() {
+        return Err(LexError {
+            message: "unterminated here-document".to_string(),
+            offset: input.len(),
+        });
+    }
+
     tokens.push(Spanned {
         token: Token::Eof,
         offset: input.len(),
     });
     Ok(tokens)
+}
+
+/// Read a here-document delimiter after `<<`/`<<-`. A quoted delimiter
+/// (`<<'EOF'` or `<<"EOF"`) suppresses body expansion; a bare delimiter ends at
+/// whitespace or an operator character. Returns `(delimiter, expand)`.
+fn read_heredoc_delim(chars: &[char], i: &mut usize) -> Result<(String, bool), LexError> {
+    if *i >= chars.len() {
+        return Err(LexError {
+            message: "unterminated here-document (missing delimiter)".to_string(),
+            offset: 0,
+        });
+    }
+    let quote = chars[*i];
+    if quote == '\'' || quote == '"' {
+        *i += 1;
+        let mut s = String::new();
+        while *i < chars.len() && chars[*i] != quote {
+            s.push(chars[*i]);
+            *i += 1;
+        }
+        if *i >= chars.len() {
+            return Err(LexError {
+                message: "unterminated here-document delimiter".to_string(),
+                offset: 0,
+            });
+        }
+        *i += 1; // closing quote
+        Ok((s, false))
+    } else {
+        let mut s = String::new();
+        while *i < chars.len()
+            && !matches!(
+                chars[*i],
+                ' ' | '\t' | '\n' | '|' | '&' | '<' | '>' | ';' | '(' | ')'
+            )
+        {
+            s.push(chars[*i]);
+            *i += 1;
+        }
+        Ok((s, true))
+    }
+}
+
+/// Collect a here-document body starting at `*i`, consuming lines until one
+/// equals `delim` (after tab-stripping when `strip`). The delimiter line and
+/// each body line's trailing newline are consumed; `*i` ends past the
+/// delimiter line. An end of input before the delimiter → unterminated.
+fn collect_heredoc_body(
+    chars: &[char],
+    i: &mut usize,
+    delim: &str,
+    strip: bool,
+) -> Result<String, LexError> {
+    let mut body = String::new();
+    loop {
+        let line_start = *i;
+        let mut j = line_start;
+        while j < chars.len() && chars[j] != '\n' {
+            j += 1;
+        }
+        let raw: String = chars[line_start..j].iter().collect();
+        let line: &str = if strip {
+            raw.trim_start_matches('\t')
+        } else {
+            &raw
+        };
+        if line == delim {
+            *i = if j < chars.len() { j + 1 } else { j };
+            return Ok(body);
+        }
+        if j >= chars.len() {
+            return Err(LexError {
+                message: "unterminated here-document".to_string(),
+                offset: 0,
+            });
+        }
+        body.push_str(line);
+        body.push('\n');
+        *i = j + 1;
+    }
 }
 
 /// If `chars[*i]` begins a substitution span — `$(...)`, `$((...))`, or a
