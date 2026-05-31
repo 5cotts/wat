@@ -153,9 +153,20 @@ fn eval_compound(
         CompoundCommand::While { cond, body } => eval_while(cond, body, false, ctx, out, err),
         CompoundCommand::Until { cond, body } => eval_while(cond, body, true, ctx, out, err),
         CompoundCommand::For { var, words, body } => eval_for(var, words, body, ctx, out, err),
-        // `case` lands in Phase D.
-        CompoundCommand::Case { .. } => {
-            unreachable!("`case` is not produced by the parser until Phase D")
+        CompoundCommand::Case { word, arms } => {
+            // Expand the subject (no field splitting), then run the first arm
+            // whose any pattern glob-matches it.
+            let subject = crate::expand::expand_value(word, ctx, err);
+            for arm in arms {
+                let matched = arm.patterns.iter().any(|p| {
+                    let pat = crate::expand::expand_value(p, ctx, err);
+                    crate::glob::match_glob(&pat, &subject)
+                });
+                if matched {
+                    return eval_streaming(&arm.body, ctx, out, err);
+                }
+            }
+            0
         }
     }
 }

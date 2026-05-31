@@ -1,4 +1,6 @@
-use crate::ast::{Command, CompoundCommand, List, Pipeline, Redirect, Separator, SimpleCommand};
+use crate::ast::{
+    CaseArm, Command, CompoundCommand, List, Pipeline, Redirect, Separator, SimpleCommand,
+};
 use crate::lexer::{lex, LexError, Spanned, Token};
 
 /// A parse error with a byte offset and human-readable message. `incomplete`
@@ -107,9 +109,15 @@ impl Parser {
 
         self.skip_newlines();
 
-        while *self.peek() != Token::Eof && !self.at_stop_word(stops) {
+        // `;;` (DSemi) always terminates a list — it is only legal as a
+        // case-arm terminator, which the case parser consumes.
+        while *self.peek() != Token::Eof
+            && *self.peek() != Token::DSemi
+            && !self.at_stop_word(stops)
+        {
             let pipeline = self.parse_pipeline()?;
             let sep = match self.peek() {
+                Token::DSemi => Separator::End,
                 Token::Semicolon => {
                     self.advance();
                     self.skip_newlines();
@@ -176,10 +184,11 @@ impl Parser {
                 "while" => return Ok(Command::Compound(self.parse_while(false)?)),
                 "until" => return Ok(Command::Compound(self.parse_while(true)?)),
                 "for" => return Ok(Command::Compound(self.parse_for()?)),
+                "case" => return Ok(Command::Compound(self.parse_case()?)),
                 // A terminator keyword in command position with no open
                 // construct is a syntax error (we'd otherwise treat it as a
                 // command name and fail with "command not found").
-                "then" | "elif" | "else" | "fi" | "do" | "done" => {
+                "then" | "elif" | "else" | "fi" | "do" | "done" | "esac" => {
                     return Err(ParseError {
                         message: format!("unexpected '{}'", w),
                         offset: self.offset(),
@@ -288,6 +297,111 @@ impl Parser {
         }
         let body = self.parse_do_group()?;
         Ok(CompoundCommand::For { var, words, body })
+    }
+
+    /// `case word in (pat[|pat]...) body ;; ... esac`.
+    fn parse_case(&mut self) -> Result<CompoundCommand, ParseError> {
+        self.advance(); // consume `case`
+        let word = match self.peek().clone() {
+            Token::Word(w) => {
+                self.advance();
+                w
+            }
+            Token::Eof => {
+                return Err(ParseError {
+                    message: "expected word after `case`".to_string(),
+                    offset: self.offset(),
+                    incomplete: true,
+                });
+            }
+            other => {
+                return Err(ParseError {
+                    message: format!("expected word after `case`, found '{}'", other.display()),
+                    offset: self.offset(),
+                    incomplete: false,
+                });
+            }
+        };
+        self.skip_newlines();
+        self.expect_keyword("in")?;
+        self.skip_newlines();
+
+        let mut arms = Vec::new();
+        loop {
+            if self.at_keyword("esac") {
+                break;
+            }
+            if *self.peek() == Token::Eof {
+                return Err(ParseError {
+                    message: "expected 'esac'".to_string(),
+                    offset: self.offset(),
+                    incomplete: true,
+                });
+            }
+            let patterns = self.parse_case_patterns()?;
+            let body = self.parse_list_until(&["esac"])?;
+            arms.push(CaseArm { patterns, body });
+            // Consume the arm terminator `;;` if present (the last arm may omit
+            // it before `esac`).
+            if *self.peek() == Token::DSemi {
+                self.advance();
+            }
+            self.skip_newlines();
+        }
+
+        self.expect_keyword("esac")?;
+        Ok(CompoundCommand::Case { word, arms })
+    }
+
+    /// Parse a case arm's pattern list: `[(] pat [| pat]* )`. Patterns must have
+    /// the closing `)` attached to the last alternative (no space before `)`).
+    fn parse_case_patterns(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut patterns = Vec::new();
+        let mut first = true;
+        loop {
+            let w = match self.peek().clone() {
+                Token::Word(w) => {
+                    self.advance();
+                    w
+                }
+                Token::Eof => {
+                    return Err(ParseError {
+                        message: "expected case pattern".to_string(),
+                        offset: self.offset(),
+                        incomplete: true,
+                    });
+                }
+                other => {
+                    return Err(ParseError {
+                        message: format!("expected case pattern, found '{}'", other.display()),
+                        offset: self.offset(),
+                        incomplete: false,
+                    });
+                }
+            };
+            // A leading `(` on the whole pattern list is optional.
+            let w = if first {
+                first = false;
+                w.strip_prefix('(').map(|s| s.to_string()).unwrap_or(w)
+            } else {
+                w
+            };
+            if let Some(stripped) = w.strip_suffix(')') {
+                patterns.push(stripped.to_string());
+                return Ok(patterns);
+            }
+            patterns.push(w);
+            // More alternatives are separated by `|`.
+            if *self.peek() == Token::Pipe {
+                self.advance();
+            } else {
+                return Err(ParseError {
+                    message: "expected ')' or '|' in case pattern".to_string(),
+                    offset: self.offset(),
+                    incomplete: *self.peek() == Token::Eof,
+                });
+            }
+        }
     }
 
     fn parse_simple_command(&mut self) -> Result<SimpleCommand, ParseError> {
@@ -498,6 +612,44 @@ mod tests {
     #[test]
     fn stray_done_is_hard_error() {
         assert!(!parse("done").unwrap_err().incomplete);
+    }
+
+    #[test]
+    fn parse_case_structure() {
+        let list = parse("case foo in a) echo 1;; b|c) echo 2;; *) echo 3;; esac").unwrap();
+        match only_command(&list) {
+            Command::Compound(CompoundCommand::Case { word, arms }) => {
+                assert_eq!(word, "foo");
+                assert_eq!(arms.len(), 3);
+                assert_eq!(arms[0].patterns, vec!["a".to_string()]);
+                assert_eq!(arms[1].patterns, vec!["b".to_string(), "c".to_string()]);
+                assert_eq!(arms[2].patterns, vec!["*".to_string()]);
+            }
+            other => panic!("expected case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_case_parenthesized_pattern() {
+        let list = parse("case x in (a|b) echo hi;; esac").unwrap();
+        match only_command(&list) {
+            Command::Compound(CompoundCommand::Case { arms, .. }) => {
+                assert_eq!(arms[0].patterns, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unterminated_case_is_incomplete() {
+        assert!(parse("case x in a) echo 1").unwrap_err().incomplete);
+        assert!(parse("case x in").unwrap_err().incomplete);
+        assert!(parse("case x").unwrap_err().incomplete);
+    }
+
+    #[test]
+    fn stray_esac_is_hard_error() {
+        assert!(!parse("esac").unwrap_err().incomplete);
     }
 
     fn cmd(name: &str, args: &[&str]) -> Command {
