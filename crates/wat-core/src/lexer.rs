@@ -71,6 +71,14 @@ impl std::fmt::Display for LexError {
     }
 }
 
+/// Internal marker the lexer prefixes onto a command/arith substitution span
+/// it saw inside double quotes. The expander (Tier 4 Phase C) honors it ONLY
+/// when it immediately precedes a `$(`/backtick span the expander recognizes,
+/// to decide that the substitution's output must not be word-split. A lone
+/// marker elsewhere is an ordinary character and round-trips literally. (Same
+/// idea as bash's internal CTLESC quoting bytes.)
+pub const QUOTED_SUBST_MARK: char = '\u{1}';
+
 /// Tokenize a shell input string into a list of [`Spanned`] tokens ending with [`Token::Eof`].
 pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
     let mut tokens = Vec::new();
@@ -177,7 +185,8 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 }
             }
             '\'' => {
-                // Single-quoted: everything literal until closing '
+                // Single-quoted: everything literal until closing '. The word
+                // may continue past the closing quote (e.g. `'a'b`).
                 i += 1;
                 let start = i;
                 let mut s = String::new();
@@ -192,17 +201,26 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     });
                 }
                 i += 1; // consume closing '
+                let s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens)?;
                 tokens.push(Spanned {
                     token: Token::Word(s),
                     offset,
                 });
             }
             '"' => {
-                // Double-quoted: allow backslash escapes, defer $ expansion
+                // Double-quoted: allow backslash escapes, defer $ expansion.
+                // A word may continue past the closing quote (e.g. `"a"b`), so
+                // hand off to extend_word after reading the quoted run.
                 i += 1;
                 let start = i;
                 let mut s = String::new();
                 while i < chars.len() && chars[i] != '"' {
+                    // Substitution inside double quotes → marked for no-split.
+                    if let Some(res) = try_consume_subst(&chars, &mut i, &byte_offsets) {
+                        s.push(QUOTED_SUBST_MARK);
+                        s.push_str(&res?);
+                        continue;
+                    }
                     if chars[i] == '\\' && i + 1 < chars.len() {
                         i += 1;
                         match chars[i] {
@@ -229,6 +247,7 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     });
                 }
                 i += 1; // consume closing "
+                let s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens)?;
                 tokens.push(Spanned {
                     token: Token::Word(s),
                     offset,
@@ -243,7 +262,7 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     // May be the start of a longer word — try to join with following word chars
                     let mut s = String::new();
                     s.push(escaped);
-                    s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens);
+                    s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens)?;
                     tokens.push(Spanned {
                         token: Token::Word(s),
                         offset,
@@ -272,11 +291,11 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 }
             }
             _ => {
-                // Bare word
-                let mut s = String::new();
-                s.push(c);
-                i += 1;
-                s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens);
+                // Bare word. Start extend_word at `i` (not i+1) so a
+                // word-initial substitution span (`$(...)`, backtick) is
+                // detected by extend_word's try_consume_subst rather than
+                // being split apart.
+                let s = extend_word(String::new(), &chars, &byte_offsets, &mut i, &mut tokens)?;
                 tokens.push(Spanned {
                     token: Token::Word(s),
                     offset,
@@ -292,16 +311,164 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
     Ok(tokens)
 }
 
-/// Continue accumulating characters into a word, handling embedded quotes and escapes.
-/// Stops at unquoted whitespace or operator characters.
+/// If `chars[*i]` begins a substitution span — `$(...)`, `$((...))`, or a
+/// backtick `` `...` `` — consume the whole balanced span and return its
+/// verbatim source text (delimiters included), advancing `*i` past it.
+/// Returns `None` if no span starts at `*i` (e.g. `$VAR`, `$?`, plain `$`).
+fn try_consume_subst(
+    chars: &[char],
+    i: &mut usize,
+    byte_offsets: &[usize],
+) -> Option<Result<String, LexError>> {
+    if chars[*i] == '`' {
+        return Some(consume_backtick(chars, i, byte_offsets));
+    }
+    if chars[*i] == '$' && *i + 1 < chars.len() && chars[*i + 1] == '(' {
+        return Some(consume_paren_span(chars, i, byte_offsets));
+    }
+    None
+}
+
+/// Consume a `$( ... )` or `$(( ... ))` span by paren-depth counting. Quotes
+/// inside the span are skipped so a `)` within `'...'`/`"..."` doesn't close it.
+/// `$((` arithmetic and `$(` command substitution are handled uniformly: depth
+/// returns to 0 on the matching close (`))` for arithmetic, `)` for command
+/// substitution). The returned string includes the leading `$(`/`$((`.
+fn consume_paren_span(
+    chars: &[char],
+    i: &mut usize,
+    byte_offsets: &[usize],
+) -> Result<String, LexError> {
+    let start = *i;
+    let mut s = String::new();
+    s.push('$');
+    *i += 1; // now at the first '('
+    let mut depth = 0usize;
+    while *i < chars.len() {
+        let c = chars[*i];
+        match c {
+            '(' => {
+                depth += 1;
+                s.push(c);
+                *i += 1;
+            }
+            ')' => {
+                depth -= 1;
+                s.push(c);
+                *i += 1;
+                if depth == 0 {
+                    return Ok(s);
+                }
+            }
+            '\'' => {
+                // Single-quoted literal inside the span: copy verbatim.
+                s.push(c);
+                *i += 1;
+                while *i < chars.len() && chars[*i] != '\'' {
+                    s.push(chars[*i]);
+                    *i += 1;
+                }
+                if *i < chars.len() {
+                    s.push('\'');
+                    *i += 1;
+                }
+            }
+            '"' => {
+                // Double-quoted run inside the span: copy verbatim, honoring \".
+                s.push(c);
+                *i += 1;
+                while *i < chars.len() && chars[*i] != '"' {
+                    if chars[*i] == '\\' && *i + 1 < chars.len() {
+                        s.push(chars[*i]);
+                        *i += 1;
+                    }
+                    s.push(chars[*i]);
+                    *i += 1;
+                }
+                if *i < chars.len() {
+                    s.push('"');
+                    *i += 1;
+                }
+            }
+            '`' => {
+                // Nested backtick inside the span: copy to its close verbatim.
+                s.push(c);
+                *i += 1;
+                while *i < chars.len() && chars[*i] != '`' {
+                    if chars[*i] == '\\' && *i + 1 < chars.len() {
+                        s.push(chars[*i]);
+                        *i += 1;
+                    }
+                    s.push(chars[*i]);
+                    *i += 1;
+                }
+                if *i < chars.len() {
+                    s.push('`');
+                    *i += 1;
+                }
+            }
+            _ => {
+                s.push(c);
+                *i += 1;
+            }
+        }
+    }
+    Err(LexError {
+        message: "unterminated command substitution".to_string(),
+        offset: byte_offsets[start],
+    })
+}
+
+/// Consume a backtick span `` `...` `` (no nesting; `` \` `` escapes a literal
+/// backtick). Returns the verbatim source including both backticks.
+fn consume_backtick(
+    chars: &[char],
+    i: &mut usize,
+    byte_offsets: &[usize],
+) -> Result<String, LexError> {
+    let start = *i;
+    let mut s = String::new();
+    s.push('`');
+    *i += 1;
+    while *i < chars.len() {
+        let c = chars[*i];
+        if c == '\\' && *i + 1 < chars.len() {
+            s.push(c);
+            *i += 1;
+            s.push(chars[*i]);
+            *i += 1;
+        } else if c == '`' {
+            s.push('`');
+            *i += 1;
+            return Ok(s);
+        } else {
+            s.push(c);
+            *i += 1;
+        }
+    }
+    Err(LexError {
+        message: "unterminated backtick substitution".to_string(),
+        offset: byte_offsets[start],
+    })
+}
+
+/// Continue accumulating characters into a word, handling embedded quotes,
+/// escapes, and substitution spans. Stops at unquoted whitespace or operator
+/// characters.
 fn extend_word(
     mut s: String,
     chars: &[char],
     byte_offsets: &[usize],
     i: &mut usize,
     _tokens: &mut Vec<Spanned>,
-) -> String {
+) -> Result<String, LexError> {
     while *i < chars.len() {
+        // Substitution spans bind tighter than the word's break characters, so
+        // an inner `|`/`;`/space inside `$(...)` does not end the word.
+        if let Some(res) = try_consume_subst(chars, i, byte_offsets) {
+            s.push_str(&res?);
+            continue;
+        }
         match chars[*i] {
             ' ' | '\t' | '\n' | '|' | '&' | '<' | '>' | ';' => break,
             '\'' => {
@@ -317,6 +484,13 @@ fn extend_word(
             '"' => {
                 *i += 1;
                 while *i < chars.len() && chars[*i] != '"' {
+                    // A substitution inside double quotes is marked so the
+                    // expander knows its output must not be word-split.
+                    if let Some(res) = try_consume_subst(chars, i, byte_offsets) {
+                        s.push(QUOTED_SUBST_MARK);
+                        s.push_str(&res?);
+                        continue;
+                    }
                     if chars[*i] == '\\' && *i + 1 < chars.len() {
                         *i += 1;
                         match chars[*i] {
@@ -350,9 +524,8 @@ fn extend_word(
                 *i += 1;
             }
         }
-        let _ = byte_offsets; // suppress unused warning
     }
-    s
+    Ok(s)
 }
 
 #[cfg(test)]
@@ -535,5 +708,144 @@ mod tests {
         assert_eq!(spanned[0].offset, 0); // 'a'
         assert_eq!(spanned[1].offset, 2); // '|'
         assert_eq!(spanned[2].offset, 4); // 'b'
+    }
+
+    // ── Tier 4 / Phase A: substitution-span lexing ───────────────────────
+
+    #[test]
+    fn lex_keeps_command_substitution_as_one_word() {
+        assert_eq!(
+            tokens("echo $(echo hi)"),
+            vec![
+                Token::Word("echo".into()),
+                Token::Word("$(echo hi)".into()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_cmdsub_with_inner_spaces_and_pipes() {
+        // The inner `|` and spaces must not break the word.
+        assert_eq!(
+            tokens("$(ls | wc -l)"),
+            vec![Token::Word("$(ls | wc -l)".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_nested_cmdsub() {
+        assert_eq!(
+            tokens("$(echo $(echo x))"),
+            vec![Token::Word("$(echo $(echo x))".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_cmdsub_paren_inside_quotes_does_not_close() {
+        // The `)` inside the string literal must not end the span.
+        assert_eq!(
+            tokens(r#"$(echo ")")"#),
+            vec![Token::Word(r#"$(echo ")")"#.into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_backticks() {
+        assert_eq!(
+            tokens("`date`"),
+            vec![Token::Word("`date`".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_arith() {
+        // `$((` is consumed as one balanced span, not confused with `$(`.
+        assert_eq!(
+            tokens("$((1 + 2))"),
+            vec![Token::Word("$((1 + 2))".into()), Token::Eof]
+        );
+        assert_eq!(
+            tokens("$(( (1 + 2) * 3 ))"),
+            vec![Token::Word("$(( (1 + 2) * 3 ))".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_cmdsub_in_argument_position() {
+        // Adjacent literals join the substitution into one word.
+        assert_eq!(
+            tokens("pre$(echo X)post"),
+            vec![Token::Word("pre$(echo X)post".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_unquoted_cmdsub_has_no_marker() {
+        // Unquoted spans carry no quoting marker.
+        let toks = tokens("$(echo a b)");
+        assert_eq!(toks, vec![Token::Word("$(echo a b)".into()), Token::Eof]);
+        if let Token::Word(w) = &toks[0] {
+            assert!(!w.contains(QUOTED_SUBST_MARK), "unexpected marker: {:?}", w);
+        }
+    }
+
+    #[test]
+    fn lex_double_quoted_cmdsub_is_marked() {
+        // Inside double quotes the span is prefixed with the quoting marker so
+        // the expander knows not to word-split its output.
+        let toks = tokens(r#""$(echo a b)""#);
+        assert_eq!(toks.len(), 2); // Word + Eof
+        if let Token::Word(w) = &toks[0] {
+            assert!(
+                w.starts_with(QUOTED_SUBST_MARK),
+                "expected leading marker, got: {:?}",
+                w
+            );
+            assert!(w.contains("$(echo a b)"), "span not intact: {:?}", w);
+        } else {
+            panic!("expected a Word token, got {:?}", toks[0]);
+        }
+    }
+
+    #[test]
+    fn lex_word_continues_after_closing_quote() {
+        // `"a"b` and `'a'b` join into a single word.
+        assert_eq!(
+            tokens(r#""a"b"#),
+            vec![Token::Word("ab".into()), Token::Eof]
+        );
+        assert_eq!(tokens("'a'b"), vec![Token::Word("ab".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn lex_unterminated_cmdsub_errors() {
+        assert!(lex("echo $(echo hi").is_err());
+    }
+
+    #[test]
+    fn lex_unterminated_arith_errors() {
+        assert!(lex("echo $((1 + 2)").is_err());
+    }
+
+    #[test]
+    fn lex_unterminated_backtick_errors() {
+        assert!(lex("echo `date").is_err());
+    }
+
+    #[test]
+    fn lex_lone_marker_passes_through_literally() {
+        // A raw U+0001 not introducing a substitution is an ordinary character;
+        // the lexer does not strip or special-case it (the expander only honors
+        // it directly before a `$(`/backtick span). This keeps single-quoting
+        // an identity for arbitrary content.
+        assert_eq!(
+            tokens("echo \u{1}hi"),
+            vec![
+                Token::Word("echo".into()),
+                Token::Word("\u{1}hi".into()),
+                Token::Eof,
+            ]
+        );
     }
 }
