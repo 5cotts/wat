@@ -102,24 +102,31 @@ impl Drop for RawModeGuard {
     }
 }
 
-/// Drive a PTY-spawned child. Allocates a PTY at the current terminal
-/// size, enters raw mode, copies bytes both directions until the child
-/// exits, then restores cooked mode (via the guard's `Drop`) before
-/// returning the exit code.
+/// Message type for the master-reader thread → main-thread channel.
+enum PtyMsg {
+    Out(Vec<u8>),
+    Done,
+}
+
+/// Drive a PTY-spawned child. Allocates a PTY at the current terminal size,
+/// enters raw mode, then runs a SIGCHLD-aware drive loop: a reader thread
+/// streams master output over a channel while the main thread polls
+/// `child.try_wait()` on each 100 ms timeout. This lets the main thread
+/// detect a stopped child (Ctrl-Z) without waiting for a master EOF that
+/// would never come from a suspended process.
 ///
-/// Returns 127 if the command can't be resolved or spawned. The stdin
-/// reader thread is intentionally detached — it may be parked in a
-/// blocking `read` on stdin even after the child exits, and joining
-/// would hang the REPL until the user pressed a key. Leaking it per
-/// command is acceptable for Tier 2; Tier 3 will revisit.
+/// Returns the child's exit code (or 127 on spawn failure). When the child
+/// is stopped rather than exited the return value is 128 + signum; Phase B
+/// will wire the stopped child into the job table instead.
 ///
-/// SIGWINCH (terminal resize) is forwarded via a background thread that
-/// reads from a `signal_hook::iterator::Signals`. When the user resizes
-/// their terminal, the thread queries the new size from crossterm and
-/// calls `child.resize(...)` so apps like `less` re-paint at the new
-/// dimensions immediately.
+/// SIGWINCH (terminal resize) is forwarded via a background thread. The
+/// stdin → master thread is intentionally detached — joining it would block
+/// the REPL until the user pressed another key.
 fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use wat_core::process::ChildState;
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let dims = PtyDims { rows, cols };
@@ -130,11 +137,10 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
             return 127;
         }
     };
-    let mut reader = child.master_reader().expect("master reader");
-    let mut writer = child.master_writer().expect("master writer");
-    // From here on `child` only needs `resize()` (from the SIGWINCH thread)
-    // and `wait()` (from this thread, at the end). Wrap in Arc<Mutex<>> so
-    // both can share it.
+    let reader = child.master_reader().expect("master reader");
+    let writer = child.master_writer().expect("master writer");
+    // Arc<Mutex<>> shared between the SIGWINCH thread (needs resize()) and
+    // this thread (needs try_wait() / wait()).
     let child = Arc::new(Mutex::new(child));
 
     let _guard = match RawModeGuard::enter() {
@@ -145,12 +151,7 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         }
     };
 
-    // SIGWINCH forwarding. signal-hook installs an async-signal-safe
-    // handler internally; `Signals::forever()` blocks on a self-pipe in
-    // this background thread and yields events as they arrive. On each
-    // event we query the new terminal size and call `child.resize`. When
-    // we close the handle at the bottom of this function, `forever()`
-    // returns `None` and the thread exits.
+    // SIGWINCH forwarding — same as Tier 2.
     #[cfg(unix)]
     let (winch_handle, winch_thread) = {
         use signal_hook::iterator::Signals;
@@ -163,8 +164,8 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
                 let Ok((cols, rows)) = crossterm::terminal::size() else {
                     continue;
                 };
-                if let Ok(mut child) = child_for_winch.lock() {
-                    let _ = child.resize(PtyDims { rows, cols });
+                if let Ok(mut c) = child_for_winch.lock() {
+                    let _ = c.resize(PtyDims { rows, cols });
                 }
             }
         });
@@ -174,10 +175,12 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
     let (winch_handle, winch_thread): (Option<()>, Option<std::thread::JoinHandle<()>>) =
         (None, None);
 
-    // stdin → master, in a detached thread.
+    // stdin → master, detached. The writer is consumed here; Phase B will
+    // store it in the job table instead of dropping it on stop.
     std::thread::spawn(move || {
         let stdin = io::stdin();
         let mut stdin = stdin.lock();
+        let mut writer = writer;
         let mut buf = [0u8; 1024];
         loop {
             match stdin.read(&mut buf) {
@@ -193,26 +196,77 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         }
     });
 
-    // master → stdout on this thread; we exit promptly when the master
-    // EOFs (which happens when the child closes its slave FDs on exit).
+    // master → channel, in a background thread.
+    let (tx, rx) = mpsc::channel::<PtyMsg>();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    let _ = tx.send(PtyMsg::Done);
+                    break;
+                }
+                Ok(n) => {
+                    if tx.send(PtyMsg::Out(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(PtyMsg::Done);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Drive loop: drain channel, poll child state on each timeout.
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    let mut buf = [0u8; 4096];
+    let mut stopped = false;
+    let mut exit_code = 0i32;
+
     loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let _ = stdout.write_all(&buf[..n]);
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(PtyMsg::Out(b)) => {
+                let _ = stdout.write_all(&b);
                 let _ = stdout.flush();
             }
-            Err(_) => break,
+            Ok(PtyMsg::Done) => {
+                // Master EOF — child closed its slave FDs (exited).
+                let code = child.lock().expect("child mutex").wait().unwrap_or(1);
+                exit_code = code;
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Poll child state without blocking.
+                let state = child
+                    .lock()
+                    .expect("child mutex")
+                    .try_wait()
+                    .unwrap_or(ChildState::Running);
+                match state {
+                    ChildState::Running => {}
+                    ChildState::Stopped { signum } => {
+                        stopped = true;
+                        exit_code = 128 + signum;
+                        break;
+                    }
+                    ChildState::Exited(code) => {
+                        exit_code = code;
+                        break;
+                    }
+                    ChildState::Signaled(signum) => {
+                        exit_code = 128 + signum;
+                        break;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    let code = child.lock().expect("child mutex").wait().unwrap_or(1);
-
-    // Tear down the SIGWINCH handler before returning so a resize at the
-    // prompt doesn't try to call `resize` on a dead child.
+    // Tear down SIGWINCH handler.
     #[cfg(unix)]
     {
         if let Some(h) = winch_handle {
@@ -227,5 +281,8 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         let _ = (winch_handle, winch_thread);
     }
 
-    code
+    // Phase B will use `stopped` to register the job instead of discarding.
+    let _ = stopped;
+
+    exit_code
 }

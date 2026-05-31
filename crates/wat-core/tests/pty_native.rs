@@ -12,7 +12,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use wat_core::process::{ProcessSpec, Signal};
+use wat_core::process::{ChildState, ProcessSpec, Signal};
 use wat_core::pty::{NativePtyHost, PtyDims, PtyHost};
 
 fn spec(argv: &[&str]) -> ProcessSpec {
@@ -173,5 +173,100 @@ fn signal_interrupt_kills_pty_child() {
         code == 130 || code != 0,
         "expected signal-encoded exit (130 ideally), got {}",
         code
+    );
+}
+
+// ── Tier 3 / Phase A: try_wait tests ──────────────────────────────────────
+
+#[test]
+fn try_wait_running_then_exited() {
+    let host = NativePtyHost;
+    let mut child = host
+        .spawn_pty(
+            spec(&["/bin/sh", "-c", "sleep 0.2"]),
+            PtyDims { rows: 24, cols: 80 },
+        )
+        .expect("spawn");
+
+    // Immediately after spawn the child should be running.
+    let state = child.try_wait().expect("try_wait");
+    assert_eq!(
+        state,
+        ChildState::Running,
+        "expected Running immediately after spawn, got {:?}",
+        state
+    );
+
+    // After 400ms the sleep has exited.
+    std::thread::sleep(Duration::from_millis(400));
+    let state = child.try_wait().expect("try_wait after sleep");
+    assert_eq!(
+        state,
+        ChildState::Exited(0),
+        "expected Exited(0) after sleep completed, got {:?}",
+        state
+    );
+}
+
+#[test]
+fn try_wait_detects_stop() {
+    let host = NativePtyHost;
+    let mut child = host
+        .spawn_pty(
+            spec(&["/usr/bin/sleep", "30"]),
+            PtyDims { rows: 24, cols: 80 },
+        )
+        .expect("spawn");
+
+    let pid = child.pid().expect("pid");
+
+    // Give the child a moment to start.
+    std::thread::sleep(Duration::from_millis(50));
+
+    // SIGSTOP works programmatically (unlike SIGTSTP which needs a terminal).
+    unsafe {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        kill(pid, 19); // SIGSTOP = 19
+    }
+
+    // Poll for up to 1s for the Stopped state.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut last = ChildState::Running;
+    while Instant::now() < deadline {
+        last = child.try_wait().expect("try_wait");
+        if matches!(last, ChildState::Stopped { .. }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        matches!(last, ChildState::Stopped { signum: 19 }),
+        "expected Stopped {{ signum: 19 }}, got {:?}",
+        last
+    );
+
+    // Resume and kill.
+    unsafe {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        kill(pid, 18); // SIGCONT = 18
+        kill(pid, 15); // SIGTERM = 15
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        last = child.try_wait().expect("try_wait after cont+term");
+        if matches!(last, ChildState::Signaled(15)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        matches!(last, ChildState::Signaled(15)),
+        "expected Signaled(15), got {:?}",
+        last
     );
 }

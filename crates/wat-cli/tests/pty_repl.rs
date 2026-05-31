@@ -368,3 +368,38 @@ fn repl_pty_command_nonzero_exit_does_not_hang_repl() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+// ── Tier 3 / Phase A: drive-loop regression ──────────────────────────────
+
+#[test]
+fn pty_normal_command_still_works_after_drive_loop_refactor() {
+    // Smoke test: the SIGCHLD-aware mpsc drive loop still forwards output
+    // and returns to the prompt for a plain command.
+    let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer
+        .write_all(b"python3 -c 'print(\"hello\")'\n")
+        .expect("write");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains("hello"),
+        "expected 'hello' from PTY command, got: {:?}",
+        after
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().ok();
+            panic!("wat did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
