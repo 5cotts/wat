@@ -23,9 +23,9 @@ pub fn eval_streaming(
         ctx.env.last_exit_code = code;
         last_code = code;
 
-        // A pending `break`/`continue` stops the rest of this list so it can
-        // propagate up to the enclosing loop evaluator.
-        if ctx.loop_ctl.is_some() {
+        // A pending `break`/`continue`, or an `exit`, stops the rest of this
+        // list so it can propagate up to the enclosing loop / the shell.
+        if ctx.loop_ctl.is_some() || ctx.exit_status.is_some() {
             break;
         }
 
@@ -73,7 +73,11 @@ pub fn eval_capture_stdout(
     match parse(src) {
         Ok(list) => {
             let mut out = VecSink::new();
+            // An `exit` inside a command substitution must not terminate the
+            // parent shell (no subshell, so isolate the flag here).
+            let saved_exit = ctx.exit_status.take();
             let code = eval_streaming(&list, ctx, &mut out, err);
+            ctx.exit_status = saved_exit;
             (code, out.into_inner())
         }
         Err(e) => {

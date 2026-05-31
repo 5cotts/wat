@@ -53,6 +53,10 @@ pub struct Context {
     /// Pending loop control set by `break`/`continue`, consumed by the
     /// enclosing loop evaluator.
     pub loop_ctl: Option<LoopCtl>,
+    /// Set by the `exit` builtin to the requested status. `eval_streaming`
+    /// stops the current list when this is `Some`, so `exit` terminates a
+    /// script mid-way; `Shell::feed*` surfaces it as `exit_requested`.
+    pub exit_status: Option<i32>,
 }
 
 impl Context {
@@ -79,6 +83,7 @@ impl Context {
             subst_depth: 0,
             loop_depth: 0,
             loop_ctl: None,
+            exit_status: None,
         }
     }
 
@@ -101,6 +106,7 @@ impl Context {
             subst_depth: 0,
             loop_depth: 0,
             loop_ctl: None,
+            exit_status: None,
         }
     }
 }
