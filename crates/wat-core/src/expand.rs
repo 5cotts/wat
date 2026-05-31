@@ -111,6 +111,20 @@ fn expand_braced(content: &str, env: &Env) -> String {
 /// side effects of `${VAR:=word}` (assign back to the environment) and
 /// `${VAR:?word}` (report an error on `err`).
 fn expand_braced_ctx(content: &str, ctx: &mut Context, err: &mut dyn OutputSink) -> String {
+    // `set -u`: a plain `${NAME}` (no operator) on an unset variable is an
+    // error. The operator forms (`:-`, `:=`, ...) intentionally tolerate unset.
+    if ctx.opt_nounset {
+        if let Braced::Plain(name) = parse_brace(content) {
+            let is_var = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_');
+            if is_var && ctx.env.get(name).is_none() {
+                err.write(format!("wat: {}: unbound variable\n", name).as_bytes());
+                ctx.exit_status = Some(1);
+            }
+        }
+    }
     match apply_braced(content, &ctx.env) {
         BracedOutcome::Value(s) => s,
         BracedOutcome::Assign { name, value } => {
@@ -550,6 +564,22 @@ fn expand_word_ctx_inner(
             continue;
         }
         if c == '$' {
+            // `set -u`: a plain `$NAME` referencing an unset variable is an
+            // error (positional and special params are exempt here).
+            if ctx.opt_nounset
+                && i + 1 < chars.len()
+                && (chars[i + 1].is_alphabetic() || chars[i + 1] == '_')
+            {
+                let mut j = i + 1;
+                while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let name: String = chars[i + 1..j].iter().collect();
+                if ctx.env.get(&name).is_none() {
+                    err.write(format!("wat: {}: unbound variable\n", name).as_bytes());
+                    ctx.exit_status = Some(1);
+                }
+            }
             let (text, next) = expand_dollar(&chars, i, &ctx.env);
             push_literal(&mut current, &text);
             i = next;

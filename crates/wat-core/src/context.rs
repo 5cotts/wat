@@ -67,6 +67,16 @@ pub struct Context {
     pub fn_depth: u32,
     /// Pending `return` status, consumed by the function-call evaluator.
     pub returning: Option<i32>,
+    /// `set -e` (errexit): abort the current list when a simple command exits
+    /// non-zero, except in condition contexts (see `errexit_suppressed`).
+    pub opt_errexit: bool,
+    /// `set -u` (nounset): expanding an unset variable is an error.
+    pub opt_nounset: bool,
+    /// `set -x` (xtrace): print each simple command to stderr before running it.
+    pub opt_xtrace: bool,
+    /// Temporarily disables `errexit` while evaluating the condition of an
+    /// `if`/`while`/`until` (those failures must not abort the shell).
+    pub errexit_suppressed: bool,
 }
 
 impl Context {
@@ -97,6 +107,10 @@ impl Context {
             functions: HashMap::new(),
             fn_depth: 0,
             returning: None,
+            opt_errexit: false,
+            opt_nounset: false,
+            opt_xtrace: false,
+            errexit_suppressed: false,
         }
     }
 
@@ -123,6 +137,10 @@ impl Context {
             functions: HashMap::new(),
             fn_depth: 0,
             returning: None,
+            opt_errexit: false,
+            opt_nounset: false,
+            opt_xtrace: false,
+            errexit_suppressed: false,
         }
     }
 }

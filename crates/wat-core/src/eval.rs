@@ -23,6 +23,20 @@ pub fn eval_streaming(
         ctx.env.last_exit_code = code;
         last_code = code;
 
+        // `set -e` (errexit): a non-zero command terminates the shell, except
+        // inside a condition context or as an operand of `&&`/`||` (where the
+        // status is "tested"). Detected here by the trailing separator.
+        if ctx.opt_errexit
+            && !ctx.errexit_suppressed
+            && code != 0
+            && matches!(
+                sep,
+                Separator::Semi | Separator::End | Separator::Background
+            )
+        {
+            ctx.exit_status = Some(code);
+        }
+
         // A pending `break`/`continue`, `return`, or `exit` stops the rest of
         // this list so it can propagate to the enclosing loop / function / shell.
         if ctx.loop_ctl.is_some() || ctx.returning.is_some() || ctx.exit_status.is_some() {
@@ -161,7 +175,7 @@ fn eval_compound(
             else_body,
         } => {
             for (cond, body) in branches {
-                let cond_code = eval_streaming(cond, ctx, out, err);
+                let cond_code = eval_condition(cond, ctx, out, err);
                 ctx.env.last_exit_code = cond_code;
                 if cond_code == 0 {
                     return eval_streaming(body, ctx, out, err);
@@ -194,6 +208,21 @@ fn eval_compound(
     }
 }
 
+/// Evaluate an `if`/`while`/`until` condition list with `errexit` suppressed:
+/// a failing condition tests false, it does not abort the shell.
+fn eval_condition(
+    cond: &List,
+    ctx: &mut Context,
+    out: &mut dyn OutputSink,
+    err: &mut dyn OutputSink,
+) -> i32 {
+    let saved = ctx.errexit_suppressed;
+    ctx.errexit_suppressed = true;
+    let code = eval_streaming(cond, ctx, out, err);
+    ctx.errexit_suppressed = saved;
+    code
+}
+
 /// `while`/`until` loop. `negate` flips the condition sense for `until`.
 fn eval_while(
     cond: &List,
@@ -210,7 +239,7 @@ fn eval_while(
         if ctx.cancel.load(Ordering::Relaxed) {
             break;
         }
-        let cond_code = eval_streaming(cond, ctx, out, err);
+        let cond_code = eval_condition(cond, ctx, out, err);
         ctx.env.last_exit_code = cond_code;
         let run = if negate {
             cond_code != 0
@@ -647,6 +676,24 @@ fn run_command(
     // must not affect expansion of the rest of the command line (POSIX).
     let (name, args) = expand_command_words(cmd, ctx, err_sink);
     let name = normalize_easter_egg(&name, &args);
+
+    // `set -u`: expansion of an unset variable set `exit_status`; abort the
+    // command before running it (and the enclosing list breaks).
+    if let Some(code) = ctx.exit_status {
+        return code;
+    }
+
+    // `set -x` (xtrace): echo the command (name + args) to stderr first.
+    if ctx.opt_xtrace && !name.is_empty() {
+        let mut line = String::from("+ ");
+        line.push_str(&name);
+        for a in &args {
+            line.push(' ');
+            line.push_str(a);
+        }
+        line.push('\n');
+        err_sink.write(line.as_bytes());
+    }
 
     // Pure assignment statement (`x=value ...` with no command word): apply to
     // the shell env. Exit status is 0, or the status of the last command
