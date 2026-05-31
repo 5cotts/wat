@@ -169,10 +169,30 @@ impl Parser {
             });
         }
 
-        let name = words.remove(0);
+        // Peel off leading `NAME=value` assignment words. They must precede the
+        // command name; once a non-assignment word appears, the rest are
+        // arguments even if they look like `a=b`.
+        let mut assignments: Vec<(String, String)> = Vec::new();
+        let mut idx = 0;
+        while idx < words.len() {
+            match split_assignment(&words[idx]) {
+                Some(kv) => {
+                    assignments.push(kv);
+                    idx += 1;
+                }
+                None => break,
+            }
+        }
+        let rest = words.split_off(idx);
+        // `rest` is the command name + args; empty means a pure assignment.
+        let mut rest = rest.into_iter();
+        let name = rest.next().unwrap_or_default();
+        let args: Vec<String> = rest.collect();
+
         Ok(Command {
+            assignments,
             name,
-            args: words,
+            args,
             redirects,
         })
     }
@@ -192,6 +212,24 @@ impl Parser {
     }
 }
 
+/// If `word` is an assignment of the form `NAME=value` — where `NAME` is a
+/// valid shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — return `(NAME, value)`
+/// with the (still-unexpanded) value. The value may be empty or contain further
+/// `=` characters. Returns `None` otherwise.
+fn split_assignment(word: &str) -> Option<(String, String)> {
+    let eq = word.find('=')?;
+    let name = &word[..eq];
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some((name.to_string(), word[eq + 1..].to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +237,7 @@ mod tests {
 
     fn cmd(name: &str, args: &[&str]) -> Command {
         Command {
+            assignments: vec![],
             name: name.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             redirects: vec![],
@@ -207,6 +246,7 @@ mod tests {
 
     fn cmd_r(name: &str, args: &[&str], redirects: Vec<Redirect>) -> Command {
         Command {
+            assignments: vec![],
             name: name.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             redirects,
@@ -220,6 +260,71 @@ mod tests {
             list.0,
             vec![(Pipeline(vec![cmd("echo", &["hello"])]), Separator::End)]
         );
+    }
+
+    #[test]
+    fn assignment_prefix_before_command() {
+        let list = parse("x=5 echo hi").unwrap();
+        let c = &list.0[0].0 .0[0];
+        assert_eq!(c.assignments, vec![("x".to_string(), "5".to_string())]);
+        assert_eq!(c.name, "echo");
+        assert_eq!(c.args, vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn pure_assignment_has_empty_name() {
+        let list = parse("foo=bar").unwrap();
+        let c = &list.0[0].0 .0[0];
+        assert_eq!(c.assignments, vec![("foo".to_string(), "bar".to_string())]);
+        assert_eq!(c.name, "");
+        assert!(c.args.is_empty());
+    }
+
+    #[test]
+    fn multiple_assignments() {
+        let list = parse("a=1 b=2 cmd").unwrap();
+        let c = &list.0[0].0 .0[0];
+        assert_eq!(
+            c.assignments,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string())
+            ]
+        );
+        assert_eq!(c.name, "cmd");
+    }
+
+    #[test]
+    fn assignment_looking_arg_after_name_is_arg() {
+        // `x=5` after the command name is a normal argument, not an assignment.
+        let list = parse("echo x=5").unwrap();
+        let c = &list.0[0].0 .0[0];
+        assert!(c.assignments.is_empty());
+        assert_eq!(c.name, "echo");
+        assert_eq!(c.args, vec!["x=5".to_string()]);
+    }
+
+    #[test]
+    fn value_with_equals_and_empty() {
+        let list = parse("PATH=/a:/b=c x=").unwrap();
+        let c = &list.0[0].0 .0[0];
+        assert_eq!(
+            c.assignments,
+            vec![
+                ("PATH".to_string(), "/a:/b=c".to_string()),
+                ("x".to_string(), String::new())
+            ]
+        );
+        assert_eq!(c.name, "");
+    }
+
+    #[test]
+    fn non_identifier_is_not_assignment() {
+        // Leading `$` makes it not a NAME=value assignment word → it's the name.
+        let list = parse("1abc=5").unwrap();
+        let c = &list.0[0].0 .0[0];
+        assert!(c.assignments.is_empty());
+        assert_eq!(c.name, "1abc=5");
     }
 
     #[test]

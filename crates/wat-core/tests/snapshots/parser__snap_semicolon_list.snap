@@ -8,6 +8,7 @@ List(
             Pipeline(
                 [
                     Command {
+                        assignments: [],
                         name: "a",
                         args: [],
                         redirects: [],
@@ -20,6 +21,7 @@ List(
             Pipeline(
                 [
                     Command {
+                        assignments: [],
                         name: "b",
                         args: [],
                         redirects: [],
@@ -32,6 +34,7 @@ List(
             Pipeline(
                 [
                     Command {
+                        assignments: [],
                         name: "c",
                         args: [],
                         redirects: [],

@@ -8,6 +8,7 @@ List(
             Pipeline(
                 [
                     Command {
+                        assignments: [],
                         name: "echo",
                         args: [
                             "hi",

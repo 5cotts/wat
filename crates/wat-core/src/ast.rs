@@ -11,9 +11,13 @@ pub enum Redirect {
     Err(String),
 }
 
-/// A single command with its name, arguments, and redirections.
+/// A single command with its leading variable assignments, name, arguments,
+/// and redirections. `assignments` are `NAME=value` prefixes (value
+/// unexpanded); when `name` is empty the command is a pure assignment
+/// statement (e.g. `x=5`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Command {
+    pub assignments: Vec<(String, String)>,
     pub name: String,
     pub args: Vec<String>,
     pub redirects: Vec<Redirect>,

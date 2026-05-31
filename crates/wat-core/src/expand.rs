@@ -178,6 +178,26 @@ fn extract_subst(chars: &[char], i: usize) -> Option<(SubstKind, String, usize)>
 /// mirrors POSIX field splitting, restricted to command substitution (this
 /// shell does not IFS-split `$VAR`). Globbing is applied by the caller.
 pub fn expand_word_ctx(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) -> Vec<String> {
+    expand_word_ctx_inner(word, ctx, err, true)
+}
+
+/// Expand an assignment right-hand side or other value context: same as
+/// `expand_word_ctx` but with **no** field splitting (and the caller does not
+/// glob the result), matching POSIX assignment semantics. Returns the single
+/// joined string.
+pub fn expand_value(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) -> String {
+    expand_word_ctx_inner(word, ctx, err, false)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+fn expand_word_ctx_inner(
+    word: &str,
+    ctx: &mut Context,
+    err: &mut dyn OutputSink,
+    split: bool,
+) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
     let mut fields: Vec<String> = Vec::new();
     // `None` = no field in progress; `Some(s)` = a field is being built (s may
@@ -208,7 +228,7 @@ pub fn expand_word_ctx(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) 
                 match kind {
                     SubstKind::Command => {
                         let output = run_command_subst(&inner, ctx, err);
-                        if quoted {
+                        if quoted || !split {
                             push_literal(&mut current, &output);
                         } else {
                             push_split(&mut fields, &mut current, &output);

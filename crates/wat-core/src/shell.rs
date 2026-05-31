@@ -75,7 +75,7 @@ impl Shell {
         input: &str,
         dims: crate::pty::PtyDims,
     ) -> Result<Box<dyn crate::pty::PtyChild>, crate::process::ProcessError> {
-        use crate::expand::expand_word_ctx;
+        use crate::expand::{expand_value, expand_word_ctx};
         use crate::glob::glob_expand;
         use crate::io::VecSink;
         use crate::process::{ProcessError, ProcessSpec};
@@ -106,6 +106,7 @@ impl Shell {
         // the borrow on `list` before we take `&mut self.ctx`.
         let cmd_name = cmd.name.clone();
         let cmd_args = cmd.args.clone();
+        let cmd_assignments = cmd.assignments.clone();
         let mut sink = VecSink::new();
         let name = expand_word_ctx(&cmd_name, &mut self.ctx, &mut sink)
             .into_iter()
@@ -127,12 +128,19 @@ impl Shell {
         let mut argv = Vec::with_capacity(args.len() + 1);
         argv.push(path.to_string_lossy().into_owned());
         argv.extend(args);
-        let env: Vec<(String, String)> = self
+        let mut env: Vec<(String, String)> = self
             .ctx
             .env
             .vars()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        // Transient assignment prefixes (`FOO=bar cmd`) overlay the child's env
+        // without touching the shell env. Later entries override earlier ones in
+        // the PTY command builder, so pushing them last is sufficient.
+        for (key, raw) in &cmd_assignments {
+            let val = expand_value(raw, &mut self.ctx, &mut sink);
+            env.push((key.clone(), val));
+        }
         let spec = ProcessSpec {
             argv,
             env,

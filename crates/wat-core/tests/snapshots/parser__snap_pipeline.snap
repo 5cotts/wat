@@ -8,11 +8,13 @@ List(
             Pipeline(
                 [
                     Command {
+                        assignments: [],
                         name: "ls",
                         args: [],
                         redirects: [],
                     },
                     Command {
+                        assignments: [],
                         name: "grep",
                         args: [
                             "foo",

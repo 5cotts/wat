@@ -330,6 +330,14 @@ field splitting → globbing.
 - **`$?`** after a command reflects that command's own exit status, not any
   substitution it contained.
 
+**Variable assignments.** A word of the form `NAME=value` before the command
+name is an assignment. On its own (`out=$(date)`, `x=5`) it sets a shell
+variable; as a prefix (`FOO=bar cmd`) it sets the variable only in that
+command's environment, reverted afterward. The right-hand side is expanded
+(tilde, `$VAR`, `$(...)`, `$((...))`) but **not** field-split or globbed, so
+`x=$(echo 'a  b')` keeps both spaces. Per POSIX, a prefix does not affect
+expansion of the rest of the line: with `x=1`, `x=5 echo $x` prints `1`.
+
 These are pure `wat-core` features, so they work identically in the browser
 shell — an inner builtin runs against the in-memory VFS; an inner external
 hits the no-op process host and yields empty output, exactly like a top-level

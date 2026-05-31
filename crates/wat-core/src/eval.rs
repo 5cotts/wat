@@ -135,6 +135,22 @@ fn eval_pipeline_chained(
         Reader(Box<dyn std::io::Read + Send>),
     }
 
+    // Apply any segment assignment prefixes transiently for the whole pipeline
+    // and restore them before returning. Strict POSIX scopes these per segment;
+    // assignment prefixes on a pipeline segment are rare, so we apply them
+    // across the pipeline (and they do affect later segments' env here).
+    let saved_assignments: Vec<(String, Option<String>)> = {
+        let mut saved = Vec::new();
+        for cmd in &pipeline.0 {
+            for (key, raw) in &cmd.assignments {
+                let val = crate::expand::expand_value(raw, ctx, final_err);
+                saved.push((key.clone(), ctx.env.get(key).map(|s| s.to_string())));
+                ctx.env.set(key.clone(), val);
+            }
+        }
+        saved
+    };
+
     let n = pipeline.0.len();
     let mut current: PipelineStdin = PipelineStdin::Bytes(initial_stdin.to_vec());
     let mut last_code = 0i32;
@@ -369,6 +385,13 @@ fn eval_pipeline_chained(
         }
     }
 
+    for (key, old) in saved_assignments {
+        match old {
+            Some(v) => ctx.env.set(key, v),
+            None => ctx.env.unset(&key),
+        }
+    }
+
     last_code
 }
 
@@ -426,8 +449,37 @@ fn run_command(
     out_sink: &mut dyn OutputSink,
     err_sink: &mut dyn OutputSink,
 ) -> i32 {
+    // Expand name + args with the *current* env first; an assignment prefix
+    // must not affect expansion of the rest of the command line (POSIX).
     let (name, args) = expand_command_words(cmd, ctx, err_sink);
     let name = normalize_easter_egg(&name, &args);
+
+    // Pure assignment statement (`x=value ...` with no command word): apply to
+    // the shell env. Exit status is 0, or the status of the last command
+    // substitution that ran while expanding the values.
+    if name.is_empty() {
+        ctx.env.last_exit_code = 0;
+        for (key, raw) in &cmd.assignments {
+            let val = crate::expand::expand_value(raw, ctx, err_sink);
+            ctx.env.set(key.clone(), val);
+        }
+        return ctx.env.last_exit_code;
+    }
+
+    // Transient assignment prefix (`x=value cmd ...`): apply to this command's
+    // environment only, then restore after it runs. Externals inherit the
+    // values via the env snapshot taken at spawn; builtins see them live.
+    let saved_assignments: Vec<(String, Option<String>)> = if cmd.assignments.is_empty() {
+        Vec::new()
+    } else {
+        let mut saved = Vec::with_capacity(cmd.assignments.len());
+        for (key, raw) in &cmd.assignments {
+            let val = crate::expand::expand_value(raw, ctx, err_sink);
+            saved.push((key.clone(), ctx.env.get(key).map(|s| s.to_string())));
+            ctx.env.set(key.clone(), val);
+        }
+        saved
+    };
 
     let stdin_bytes = apply_input_redirect(cmd, ctx, stdin_data.to_vec());
 
@@ -462,6 +514,14 @@ fn run_command(
     };
 
     apply_output_redirects(cmd, ctx, local_out.as_slice(), local_err.as_slice());
+
+    // Restore any transient assignment-prefix variables.
+    for (key, old) in saved_assignments {
+        match old {
+            Some(v) => ctx.env.set(key, v),
+            None => ctx.env.unset(&key),
+        }
+    }
     code
 }
 
