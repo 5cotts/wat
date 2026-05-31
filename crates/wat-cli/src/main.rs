@@ -28,6 +28,10 @@ fn main() {
     signal_hook::flag::register(signal_hook::consts::SIGINT, cancel.clone())
         .expect("install SIGINT handler");
 
+    // SIGCHLD handler: reap finished/stopped background jobs and update the table.
+    #[cfg(unix)]
+    install_sigchld_handler(shell.jobs());
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stdin_is_tty = io::stdin().is_terminal();
@@ -72,8 +76,13 @@ fn main() {
         }
 
         if stdin_is_tty && shell.pty_eligible(&line) {
-            let exit = run_in_pty(&mut shell, &line);
-            shell.set_last_exit_code(exit);
+            if shell.is_background_cmd(&line) {
+                spawn_background(&mut shell, &line);
+                shell.set_last_exit_code(0);
+            } else {
+                let exit = run_in_pty(&mut shell, &line);
+                shell.set_last_exit_code(exit);
+            }
         } else {
             let mut out = StdoutSink;
             let mut err = StderrSink;
@@ -100,6 +109,108 @@ fn main() {
         print!("{}", shell.prompt());
         stdout.lock().flush().unwrap();
     }
+}
+
+/// Install a SIGCHLD handler that reaps finished background jobs and marks them Done.
+///
+/// Critically, this handler only waits on PIDs of jobs already in the table
+/// (background jobs). It never calls `waitpid(-1, ...)` which would race with
+/// the foreground drive loop's `try_wait` for the same child.
+#[cfg(unix)]
+fn install_sigchld_handler(jobs: std::sync::Arc<std::sync::Mutex<wat_core::jobs::JobTable>>) {
+    use signal_hook::iterator::Signals;
+    use wat_core::jobs::JobState;
+
+    let mut signals = Signals::new([signal_hook::consts::SIGCHLD]).expect("install SIGCHLD");
+    std::thread::spawn(move || {
+        for _sig in signals.forever() {
+            let mut table = jobs.lock().expect("job table");
+            // Collect the pids of Running background jobs to check.
+            let job_pids: Vec<(u32, i32)> = table
+                .iter()
+                .filter(|j| matches!(j.state, JobState::Running))
+                .filter_map(|j| {
+                    let pid = j.pty.as_ref()?.child.pid()?;
+                    Some((j.id, pid))
+                })
+                .collect();
+
+            for (jid, pid) in job_pids {
+                let mut status: i32 = 0;
+                let rc = unsafe {
+                    extern "C" {
+                        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+                    }
+                    waitpid(pid, &mut status, 1 | 2 | 8) // WNOHANG | WUNTRACED | WCONTINUED
+                };
+                if rc <= 0 {
+                    continue;
+                }
+                let child_state = decode_wait_status(status);
+                if let Some(job) = table.get_mut(jid) {
+                    match child_state {
+                        wat_core::process::ChildState::Exited(code) => {
+                            job.state = JobState::Done(code);
+                        }
+                        wat_core::process::ChildState::Signaled(signum) => {
+                            job.state = JobState::Done(128 + signum);
+                        }
+                        wat_core::process::ChildState::Stopped { .. } => {
+                            job.state = JobState::Stopped;
+                        }
+                        wat_core::process::ChildState::Running => {}
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+fn decode_wait_status(status: i32) -> wat_core::process::ChildState {
+    use wat_core::process::ChildState;
+    if (status & 0x7f) == 0 {
+        ChildState::Exited((status >> 8) & 0xff)
+    } else if (status & 0xff) == 0x7f {
+        ChildState::Stopped {
+            signum: (status >> 8) & 0xff,
+        }
+    } else {
+        ChildState::Signaled(status & 0x7f) // raw signum; callers encode as 128+signum
+    }
+}
+
+/// Spawn `input` as a background PTY job. Returns immediately; the SIGCHLD
+/// handler marks the job Done when it finishes.
+fn spawn_background(shell: &mut Shell, input: &str) {
+    use wat_core::jobs::{JobPty, JobState};
+
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let dims = PtyDims { rows, cols };
+    // Strip the trailing `&` for spawn_pty (which still expects a clean command).
+    let cmd = input.trim().trim_end_matches('&').trim().to_string();
+    let mut child = match shell.spawn_pty(input, dims) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wat: {}", e);
+            return;
+        }
+    };
+    let pid = child.pid().unwrap_or(0);
+    // Drop reader/writer — nobody will drive the PTY. Output that fills the
+    // slave pipe buffer will cause the child to block (documented limitation).
+    let _ = child.master_reader();
+    let _ = child.master_writer();
+    let pty = JobPty {
+        child,
+        reader: None,
+        writer: None,
+    };
+    let jobs_arc = shell.jobs();
+    let mut table = jobs_arc.lock().expect("job table");
+    let jid = table.add(cmd.clone(), pid, pty);
+    table.get_mut(jid).unwrap().state = JobState::Running;
+    eprintln!("[{}] {}", jid, pid);
 }
 
 /// Print Done/Exit notifications for background jobs that finished.

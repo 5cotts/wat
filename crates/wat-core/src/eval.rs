@@ -35,7 +35,8 @@ pub fn eval_streaming(
                     iter.next();
                 }
             }
-            Separator::Semi | Separator::End => {}
+            // Background (`&`) is handled by the REPL before reaching eval.
+            Separator::Semi | Separator::End | Separator::Background => {}
         }
     }
 

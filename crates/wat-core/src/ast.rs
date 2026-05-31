@@ -32,6 +32,8 @@ pub enum Separator {
     And,
     /// `||`
     Or,
+    /// `&` — run the preceding pipeline in the background.
+    Background,
     /// End of input (last item in the list has no trailing separator).
     End,
 }
