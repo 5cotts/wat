@@ -15,6 +15,19 @@ pub enum Signal {
     Interrupt,
 }
 
+/// Non-blocking child state returned by `PtyChild::try_wait`.
+#[cfg(feature = "native-pty")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChildState {
+    Running,
+    Stopped {
+        signum: i32,
+    },
+    Exited(i32),
+    /// Killed by a signal; callers encode exit code as 128 + signum.
+    Signaled(i32),
+}
+
 /// Errors that can occur while resolving or spawning a command.
 #[derive(Debug)]
 pub enum ProcessError {
