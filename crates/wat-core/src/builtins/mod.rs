@@ -33,6 +33,8 @@ pub fn run_builtin<'a>(
         "continue" => Some(loop_ctl_builtin(LoopCtl::Continue, "continue", ctx, io)),
         "test" => Some(test_cmd::test_builtin("test", args, ctx, io)),
         "[" => Some(test_cmd::test_builtin("[", args, ctx, io)),
+        "set" => Some(set_builtin(args, ctx, io)),
+        "shift" => Some(shift_builtin(args, ctx, io)),
         // File builtins
         "ls" => Some(ls(args, ctx, io)),
         "cat" => Some(cat(args, ctx, io)),
@@ -95,6 +97,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "continue"
             | "test"
             | "["
+            | "set"
+            | "shift"
             | "ls"
             | "cat"
             | "mkdir"
@@ -122,6 +126,42 @@ pub fn is_builtin(name: &str) -> bool {
             | "sh whoami.sh"
             | "__konami__"
     )
+}
+
+/// `set`: with no args, list variables; `set -- a b c` (or `set a b c`)
+/// replaces the positional parameters. Option flags (`-e`/`-u`/`-x`) arrive in
+/// Phase E and are treated as a no-op here unless followed by `--`.
+fn set_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    if args.is_empty() {
+        return env_builtin(ctx, io);
+    }
+    let operands: Vec<String> = if args[0] == "--" {
+        args[1..].to_vec()
+    } else if !args[0].starts_with('-') && !args[0].starts_with('+') {
+        args.to_vec()
+    } else {
+        // Flags present (Phase E). Take operands after a `--`, else change nothing.
+        match args.iter().position(|a| a == "--") {
+            Some(p) => args[p + 1..].to_vec(),
+            None => return 0,
+        }
+    };
+    ctx.env.params = operands;
+    0
+}
+
+/// `shift [n]`: drop the first `n` positional parameters (default 1).
+fn shift_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    let n = args
+        .first()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+    if n > ctx.env.params.len() {
+        io.write_err("wat: shift: shift count out of range\n");
+        return 1;
+    }
+    ctx.env.params.drain(0..n);
+    0
 }
 
 /// `break` / `continue`: request loop control. Only meaningful inside a loop;
