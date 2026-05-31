@@ -54,6 +54,12 @@ impl Shell {
         self
     }
 
+    /// Return the shared job table so wat-cli can read/write it from the REPL loop.
+    #[cfg(feature = "native-pty")]
+    pub fn jobs(&self) -> std::sync::Arc<std::sync::Mutex<crate::jobs::JobTable>> {
+        self.ctx.jobs.clone()
+    }
+
     /// Parse `input`, resolve the leading command, and spawn it inside a
     /// PTY. Returns the running child to the caller, who is responsible
     /// for shuttling bytes between the user's terminal and the master

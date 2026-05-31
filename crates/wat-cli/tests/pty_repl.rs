@@ -403,3 +403,44 @@ fn pty_normal_command_still_works_after_drive_loop_refactor() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+// ── Tier 3 / Phase B: Ctrl-Z stops child, returns to prompt ──────────────
+
+#[test]
+fn ctrl_z_stops_pty_child_and_returns_to_prompt() {
+    let (_master, mut reader, mut writer, mut child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // sleep 30 is a single external command → PTY-routed.
+    writer.write_all(b"sleep 30\n").expect("write sleep");
+    // Give the child a moment to start running inside the PTY.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Send Ctrl-Z (0x1a). The PTY driver forwards it to the inner slave as
+    // SIGTSTP; sleep stops. wat-cli detects via try_wait and returns to prompt.
+    writer.write_all(b"\x1a").expect("write ctrl-z");
+
+    // Read until we see a prompt again.
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains("Stopped"),
+        "expected 'Stopped' notification after Ctrl-Z, got: {:?}",
+        after
+    );
+
+    // wat-cli should still be alive and responsive.
+    writer.write_all(b"exit\n").expect("exit");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().ok();
+            panic!("wat did not exit after ctrl-z test");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
