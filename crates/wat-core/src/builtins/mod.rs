@@ -240,8 +240,11 @@ fn exit_builtin(args: &[String], ctx: &mut Context) -> i32 {
     let code = args
         .first()
         .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
+        .unwrap_or(ctx.env.last_exit_code);
     ctx.env.last_exit_code = code;
+    // Signal the evaluator to stop the current list (so `exit` mid-script
+    // terminates immediately); `Shell::feed*` surfaces this as exit_requested.
+    ctx.exit_status = Some(code);
     code
 }
 

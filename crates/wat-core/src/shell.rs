@@ -279,13 +279,18 @@ impl Shell {
 
         self.ctx.history.push(input);
 
-        match parse(input) {
+        let out = match parse(input) {
             Ok(list) => {
                 let (_, output) = eval(&list, &mut self.ctx);
                 output
             }
             Err(e) => format!("wat: {}\n", e),
+        };
+        if let Some(code) = self.ctx.exit_status.take() {
+            self.ctx.env.last_exit_code = code;
+            self.exit_requested = true;
         }
+        out
     }
 
     /// Streaming API: evaluates `input` and forwards stdout/stderr to the
@@ -311,7 +316,7 @@ impl Shell {
 
         self.ctx.history.push(input);
 
-        match parse(input) {
+        let code = match parse(input) {
             Ok(list) => {
                 let code = eval_streaming(&list, &mut self.ctx, out, err);
                 self.ctx.env.last_exit_code = code;
@@ -323,7 +328,14 @@ impl Shell {
                 self.ctx.env.last_exit_code = 2;
                 2
             }
+        };
+        // An `exit` builtin run anywhere in `input` requests shell termination.
+        if let Some(c) = self.ctx.exit_status.take() {
+            self.ctx.env.last_exit_code = c;
+            self.exit_requested = true;
+            return c;
         }
+        code
     }
 
     /// Convenience for callers (mainly the native CLI) that want one combined

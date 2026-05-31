@@ -28,6 +28,13 @@ fn main() {
     signal_hook::flag::register(signal_hook::consts::SIGINT, cancel.clone())
         .expect("install SIGINT handler");
 
+    // Non-interactive invocation: `wat -c "cmds"`, `wat FILE [args]`, or a
+    // script piped on stdin. Returns the process exit code; falls through to
+    // the interactive REPL only when there's no script source.
+    if let Some(code) = run_non_interactive(&mut shell) {
+        std::process::exit(code);
+    }
+
     // SIGCHLD handler: reap finished/stopped background jobs and update the table.
     #[cfg(unix)]
     install_sigchld_handler(shell.jobs());
@@ -174,6 +181,70 @@ fn main() {
         print!("{}", shell.prompt());
         stdout.lock().flush().unwrap();
     }
+}
+
+/// Handle non-interactive invocation. Returns `Some(exit_code)` if a script
+/// source was supplied (and should run, then the process exits with that code),
+/// or `None` to fall through to the interactive REPL.
+///
+/// Forms (POSIX-ish):
+/// - `wat -c "cmds" [name [args...]]` — run `cmds`; `name` is `$0`, rest are
+///   positional params.
+/// - `wat FILE [args...]` — run FILE as a script; `$0` = FILE, rest are params.
+/// - no args + stdin is not a TTY — read all of stdin and run it as a script.
+/// - no args + a TTY — `None` (interactive REPL).
+fn run_non_interactive(shell: &mut Shell) -> Option<i32> {
+    let argv: Vec<String> = std::env::args().collect();
+    let rest = &argv[1..];
+
+    if rest.first().map(|s| s.as_str()) == Some("-c") {
+        let Some(src) = rest.get(1) else {
+            eprintln!("wat: -c: option requires an argument");
+            return Some(2);
+        };
+        shell.ctx.env.arg0 = rest.get(2).cloned().unwrap_or_else(|| "wat".to_string());
+        shell.ctx.env.params = rest.get(3..).map(|s| s.to_vec()).unwrap_or_default();
+        return Some(run_source(shell, src));
+    }
+
+    // A first argument that isn't an option flag is a script file path.
+    if let Some(path) = rest.first() {
+        if path != "-" && !path.starts_with('-') {
+            match std::fs::read_to_string(path) {
+                Ok(src) => {
+                    shell.ctx.env.arg0 = path.clone();
+                    shell.ctx.env.params = rest[1..].to_vec();
+                    return Some(run_source(shell, &src));
+                }
+                Err(e) => {
+                    eprintln!("wat: cannot open {}: {}", path, e);
+                    return Some(127);
+                }
+            }
+        }
+    }
+
+    // No script args: a piped (non-TTY) stdin is a script; a TTY is interactive.
+    if !rest.is_empty() {
+        return None; // unknown flags → fall through to the REPL
+    }
+    if !io::stdin().is_terminal() {
+        let mut src = String::new();
+        if io::stdin().read_to_string(&mut src).is_ok() && !src.trim().is_empty() {
+            return Some(run_source(shell, &src));
+        }
+    }
+    None
+}
+
+/// Feed an entire script source (no prompt, no PTY routing), flush, and return
+/// the resulting exit status.
+fn run_source(shell: &mut Shell, src: &str) -> i32 {
+    let mut out = StdoutSink;
+    let mut err = StderrSink;
+    shell.feed_streaming(src, &mut out, &mut err);
+    let _ = io::stdout().flush();
+    shell.last_exit_code()
 }
 
 /// Install a SIGCHLD handler that reaps finished background jobs and marks them Done.
