@@ -19,4 +19,4 @@ pub mod pty;
 pub mod shell;
 pub mod vfs;
 
-pub use shell::Shell;
+pub use shell::{ParseStatus, Shell};

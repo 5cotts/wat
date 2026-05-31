@@ -12,6 +12,17 @@ pub struct Shell {
     pub exit_requested: bool,
 }
 
+/// Result of classifying input for multi-line continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseStatus {
+    /// Parses cleanly — run it.
+    Complete,
+    /// Reached end-of-input mid-construct — read another line.
+    Incomplete,
+    /// A hard syntax error (message included) — report it, don't keep reading.
+    Error(String),
+}
+
 impl Shell {
     pub fn new() -> Self {
         Self {
@@ -234,6 +245,23 @@ impl Shell {
         format!("5cotts@zo {} % ", self.ctx.env.prompt_cwd())
     }
 
+    /// The continuation prompt shown while a multi-line command is still open.
+    pub fn continuation_prompt(&self) -> String {
+        "> ".to_string()
+    }
+
+    /// Classify `input` for multi-line REPL input: does it parse, need more
+    /// lines (an open construct or unterminated quote/substitution), or contain
+    /// a hard syntax error? Shared by the native REPL and the WASM bridge so
+    /// both make the same "keep reading" decision.
+    pub fn parse_status(&self, input: &str) -> ParseStatus {
+        match parse(input) {
+            Ok(_) => ParseStatus::Complete,
+            Err(e) if e.incomplete => ParseStatus::Incomplete,
+            Err(e) => ParseStatus::Error(e.to_string()),
+        }
+    }
+
     /// Buffered API: evaluates `input` and returns the combined output as a
     /// `String`. Stderr is interleaved into the returned string when not
     /// redirected. Kept for the WASM bridge and existing callers.
@@ -334,5 +362,41 @@ impl Shell {
 impl Default for Shell {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod parse_status_tests {
+    use super::{ParseStatus, Shell};
+
+    fn status(input: &str) -> ParseStatus {
+        Shell::with_memory_vfs().parse_status(input)
+    }
+
+    #[test]
+    fn complete_inputs() {
+        assert_eq!(status("echo hi"), ParseStatus::Complete);
+        assert_eq!(status("if true; then echo hi; fi"), ParseStatus::Complete);
+        assert_eq!(status(""), ParseStatus::Complete);
+        assert_eq!(
+            status("for x in a b; do echo $x; done"),
+            ParseStatus::Complete
+        );
+    }
+
+    #[test]
+    fn incomplete_inputs() {
+        assert_eq!(status("if true; then echo hi"), ParseStatus::Incomplete);
+        assert_eq!(status("for x in a b; do echo $x"), ParseStatus::Incomplete);
+        assert_eq!(status("while true; do"), ParseStatus::Incomplete);
+        assert_eq!(status("case x in a) echo 1"), ParseStatus::Incomplete);
+        assert_eq!(status("echo \"unterminated"), ParseStatus::Incomplete);
+        assert_eq!(status("echo $(echo hi"), ParseStatus::Incomplete);
+    }
+
+    #[test]
+    fn hard_errors() {
+        assert!(matches!(status("fi"), ParseStatus::Error(_)));
+        assert!(matches!(status("echo a | | b"), ParseStatus::Error(_)));
     }
 }

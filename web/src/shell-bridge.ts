@@ -23,6 +23,16 @@ export class Bridge {
     return this.shell.prompt();
   }
 
+  /** Continuation prompt shown while a multi-line command is still open. */
+  continuationPrompt(): string {
+    return this.shell.continuation_prompt();
+  }
+
+  /** True if `input` is an unfinished multi-line command (keep buffering). */
+  isIncomplete(input: string): boolean {
+    return this.shell.is_incomplete(input);
+  }
+
   /** Feed input and return the visible output (OSC sequences stripped and dispatched). */
   feed(input: string): string {
     const raw = this.shell.feed(input);

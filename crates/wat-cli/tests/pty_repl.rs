@@ -923,3 +923,86 @@ fn ctrl_c_interrupts_infinite_loop() {
     writer.write_all(b"exit\n").expect("exit");
     wait_for_wat_exit(child);
 }
+
+// ── Tier 5 / Phase F: multi-line continuation in the REPL ─────────────────
+
+const CONT_MARKER: &str = "> ";
+
+#[test]
+fn multiline_if_with_continuation_prompt() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Type an `if` across three lines; a continuation prompt appears between.
+    writer.write_all(b"if true\n").expect("line 1");
+    let cont = read_until(&mut reader, CONT_MARKER, deadline());
+    assert!(
+        cont.contains(CONT_MARKER),
+        "no continuation prompt: {:?}",
+        cont
+    );
+
+    writer.write_all(b"then echo multi\n").expect("line 2");
+    read_until(&mut reader, CONT_MARKER, deadline());
+
+    writer.write_all(b"fi\n").expect("line 3");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("multi"),
+        "expected body output, got: {:?}",
+        out
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn multiline_for_loop_across_lines() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer.write_all(b"for x in a b c\n").expect("l1");
+    read_until(&mut reader, CONT_MARKER, deadline());
+    writer.write_all(b"do echo $x\n").expect("l2");
+    read_until(&mut reader, CONT_MARKER, deadline());
+    writer.write_all(b"done\n").expect("l3");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains('a') && out.contains('b') && out.contains('c'),
+        "expected a/b/c, got: {:?}",
+        out
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn ctrl_c_discards_continuation_buffer() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Start an `if`, then Ctrl-C. The blocking line read isn't interrupted
+    // mid-read (signal-hook uses SA_RESTART), so Ctrl-C takes effect on the
+    // next Enter: the accumulated buffer is discarded and we return to the
+    // main prompt without running the `if`.
+    writer.write_all(b"if true\n").expect("l1");
+    read_until(&mut reader, CONT_MARKER, deadline());
+    writer.write_all(b"\x03\n").expect("ctrl-c + enter");
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // The shell is responsive and the discarded `if` did not run.
+    writer.write_all(b"echo recovered\n").expect("marker");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains("recovered"), "shell not responsive: {:?}", out);
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
