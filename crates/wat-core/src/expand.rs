@@ -95,10 +95,38 @@ fn positional(n: usize, env: &Env) -> String {
     }
 }
 
-/// Expand the contents of `${...}` (scalar form). Handles positional params
-/// (`${N}`, `${#}`, `${@}`, `${*}`) and plain variables. Parameter-expansion
-/// operators (`:-`, `#`, `%`, length `${#VAR}`, ...) arrive in Phase D.
-fn expand_braced(name: &str, env: &Env) -> String {
+/// Expand the contents of `${...}` in a pure (read-only) context. Mutating
+/// operators (`:=`) yield their value without assigning, and an unset `:?`
+/// yields the empty string without erroring; the context-aware
+/// `expand_braced_ctx` performs the side effects.
+fn expand_braced(content: &str, env: &Env) -> String {
+    match apply_braced(content, env) {
+        BracedOutcome::Value(s) => s,
+        BracedOutcome::Assign { value, .. } => value,
+        BracedOutcome::Error { .. } => String::new(),
+    }
+}
+
+/// Expand `${...}` in the command path. Unlike the pure form this performs the
+/// side effects of `${VAR:=word}` (assign back to the environment) and
+/// `${VAR:?word}` (report an error on `err`).
+fn expand_braced_ctx(content: &str, ctx: &mut Context, err: &mut dyn OutputSink) -> String {
+    match apply_braced(content, &ctx.env) {
+        BracedOutcome::Value(s) => s,
+        BracedOutcome::Assign { name, value } => {
+            ctx.env.set(name, value.clone());
+            value
+        }
+        BracedOutcome::Error { message } => {
+            err.write(format!("wat: {}\n", message).as_bytes());
+            String::new()
+        }
+    }
+}
+
+/// Plain `${name}` with no operator: positional params (`${N}`, `${#}`,
+/// `${@}`, `${*}`) and plain variables.
+fn expand_braced_plain(name: &str, env: &Env) -> String {
     if name == "#" {
         env.params.len().to_string()
     } else if name == "@" || name == "*" {
@@ -109,6 +137,214 @@ fn expand_braced(name: &str, env: &Env) -> String {
     } else {
         expand_var(name, env).to_string()
     }
+}
+
+/// A parameter-expansion operator parsed from `${name OP word}`. `colon`
+/// distinguishes the `:`-prefixed forms (which also act when the value is set
+/// but empty) from the plain forms (which act only when unset).
+#[derive(Clone, Copy)]
+enum BraceOp {
+    UseDefault { colon: bool },
+    Assign { colon: bool },
+    Error { colon: bool },
+    Alt { colon: bool },
+    TrimPrefix { longest: bool },
+    TrimSuffix { longest: bool },
+}
+
+/// Parsed shape of `${...}` content.
+enum Braced<'a> {
+    /// `${#name}` — length of the named parameter's value.
+    Length(&'a str),
+    /// `${name}` with no operator (incl. `@`, `*`, `#`, positional digits).
+    Plain(&'a str),
+    /// `${name OP word}`.
+    Op {
+        name: &'a str,
+        op: BraceOp,
+        word: &'a str,
+    },
+}
+
+/// The result of evaluating `${...}` read-only: a plain value, or a request
+/// for the caller to assign (`:=`) or report an error (`:?`).
+enum BracedOutcome {
+    Value(String),
+    Assign { name: String, value: String },
+    Error { message: String },
+}
+
+/// Split `${...}` content into its name, operator, and operand word.
+fn parse_brace(content: &str) -> Braced<'_> {
+    // Whole-content special parameters keep their existing meaning.
+    if content == "@" || content == "*" || content == "#" {
+        return Braced::Plain(content);
+    }
+    if !content.is_empty() && content.chars().all(|c| c.is_ascii_digit()) {
+        return Braced::Plain(content);
+    }
+    // `${#name}` is length (note `${#}` was handled as Plain above).
+    if let Some(rest) = content.strip_prefix('#') {
+        return Braced::Length(rest);
+    }
+    let name_end = content
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(content.len());
+    let name = &content[..name_end];
+    let rest = &content[name_end..];
+    if rest.is_empty() {
+        return Braced::Plain(content);
+    }
+    let bytes = rest.as_bytes();
+    let (op, word) = if bytes[0] == b':' && rest.len() >= 2 {
+        let op = match bytes[1] {
+            b'-' => BraceOp::UseDefault { colon: true },
+            b'=' => BraceOp::Assign { colon: true },
+            b'?' => BraceOp::Error { colon: true },
+            b'+' => BraceOp::Alt { colon: true },
+            _ => return Braced::Plain(content),
+        };
+        (op, &rest[2..])
+    } else {
+        match bytes[0] {
+            b'-' => (BraceOp::UseDefault { colon: false }, &rest[1..]),
+            b'=' => (BraceOp::Assign { colon: false }, &rest[1..]),
+            b'?' => (BraceOp::Error { colon: false }, &rest[1..]),
+            b'+' => (BraceOp::Alt { colon: false }, &rest[1..]),
+            b'#' if rest.starts_with("##") => (BraceOp::TrimPrefix { longest: true }, &rest[2..]),
+            b'#' => (BraceOp::TrimPrefix { longest: false }, &rest[1..]),
+            b'%' if rest.starts_with("%%") => (BraceOp::TrimSuffix { longest: true }, &rest[2..]),
+            b'%' => (BraceOp::TrimSuffix { longest: false }, &rest[1..]),
+            _ => return Braced::Plain(content),
+        }
+    };
+    Braced::Op { name, op, word }
+}
+
+/// Look up a `${name}` reference for the operator forms. Returns `None` when the
+/// parameter is unset and `Some` (possibly empty) when set, so the `:` operators
+/// can distinguish unset from empty.
+fn lookup_param(name: &str, env: &Env) -> Option<String> {
+    if name == "@" || name == "*" {
+        if env.params.is_empty() {
+            None
+        } else {
+            Some(env.params.join(" "))
+        }
+    } else if name == "#" {
+        Some(env.params.len().to_string())
+    } else if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+        let n: usize = name.parse().unwrap_or(0);
+        if n == 0 {
+            Some(env.arg0.clone())
+        } else {
+            env.params.get(n - 1).cloned()
+        }
+    } else {
+        env.get(name).map(|s| s.to_string())
+    }
+}
+
+/// Evaluate `${...}` read-only, returning a value or a side-effect request.
+fn apply_braced(content: &str, env: &Env) -> BracedOutcome {
+    match parse_brace(content) {
+        Braced::Length(name) => {
+            let len = lookup_param(name, env).unwrap_or_default().chars().count();
+            BracedOutcome::Value(len.to_string())
+        }
+        Braced::Plain(name) => BracedOutcome::Value(expand_braced_plain(name, env)),
+        Braced::Op { name, op, word } => {
+            let value = lookup_param(name, env);
+            let set = value.is_some();
+            let nonempty = value.as_deref().map(|v| !v.is_empty()).unwrap_or(false);
+            // A `:` operator triggers when unset *or* empty; the plain form only
+            // when unset.
+            let triggers = |colon: bool| if colon { !nonempty } else { !set };
+            match op {
+                BraceOp::UseDefault { colon } => {
+                    if triggers(colon) {
+                        BracedOutcome::Value(expand_word(word, env))
+                    } else {
+                        BracedOutcome::Value(value.unwrap())
+                    }
+                }
+                BraceOp::Assign { colon } => {
+                    if triggers(colon) {
+                        BracedOutcome::Assign {
+                            name: name.to_string(),
+                            value: expand_word(word, env),
+                        }
+                    } else {
+                        BracedOutcome::Value(value.unwrap())
+                    }
+                }
+                BraceOp::Error { colon } => {
+                    if triggers(colon) {
+                        let message = if word.is_empty() {
+                            format!("{}: parameter null or not set", name)
+                        } else {
+                            format!("{}: {}", name, expand_word(word, env))
+                        };
+                        BracedOutcome::Error { message }
+                    } else {
+                        BracedOutcome::Value(value.unwrap())
+                    }
+                }
+                BraceOp::Alt { colon } => {
+                    let use_alt = if colon { nonempty } else { set };
+                    if use_alt {
+                        BracedOutcome::Value(expand_word(word, env))
+                    } else {
+                        BracedOutcome::Value(String::new())
+                    }
+                }
+                BraceOp::TrimPrefix { longest } => BracedOutcome::Value(trim_prefix(
+                    &value.unwrap_or_default(),
+                    &expand_word(word, env),
+                    longest,
+                )),
+                BraceOp::TrimSuffix { longest } => BracedOutcome::Value(trim_suffix(
+                    &value.unwrap_or_default(),
+                    &expand_word(word, env),
+                    longest,
+                )),
+            }
+        }
+    }
+}
+
+/// Remove a prefix of `value` matching the glob `pat` (`${VAR#pat}` shortest,
+/// `${VAR##pat}` longest). Returns `value` unchanged when nothing matches.
+fn trim_prefix(value: &str, pat: &str, longest: bool) -> String {
+    let mut cuts: Vec<usize> = value.char_indices().map(|(i, _)| i).collect();
+    cuts.push(value.len());
+    if longest {
+        cuts.reverse();
+    }
+    for cut in cuts {
+        if crate::glob::match_glob(pat, &value[..cut]) {
+            return value[cut..].to_string();
+        }
+    }
+    value.to_string()
+}
+
+/// Remove a suffix of `value` matching the glob `pat` (`${VAR%pat}` shortest,
+/// `${VAR%%pat}` longest). Returns `value` unchanged when nothing matches.
+fn trim_suffix(value: &str, pat: &str, longest: bool) -> String {
+    // `cut` is the byte offset where the suffix begins. The shortest suffix is
+    // the largest `cut`; the longest suffix is the smallest.
+    let mut cuts: Vec<usize> = value.char_indices().map(|(i, _)| i).collect();
+    cuts.push(value.len());
+    if !longest {
+        cuts.reverse();
+    }
+    for cut in cuts {
+        if crate::glob::match_glob(pat, &value[cut..]) {
+            return value[..cut].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn expand_var<'a>(name: &str, env: &'a Env) -> &'a str {
@@ -294,6 +530,23 @@ fn expand_word_ctx_inner(
         if c == '$' && i + 1 < chars.len() && chars[i + 1] == '@' {
             push_fields(&mut fields, &mut current, &ctx.env.params);
             i += 2;
+            continue;
+        }
+        // `${...}` parameter expansion is handled here (not via expand_dollar)
+        // so the `:=`/`:?` operators can mutate the environment or report
+        // errors. Never split (matching `$VAR`).
+        if c == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            let mut j = i + 2;
+            while j < chars.len() && chars[j] != '}' {
+                j += 1;
+            }
+            let content: String = chars[i + 2..j].iter().collect();
+            if j < chars.len() {
+                j += 1; // consume '}'
+            }
+            let val = expand_braced_ctx(&content, ctx, err);
+            push_literal(&mut current, &val);
+            i = j;
             continue;
         }
         if c == '$' {
