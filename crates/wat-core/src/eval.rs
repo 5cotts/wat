@@ -1,7 +1,7 @@
 use crate::ast::{Command, CompoundCommand, List, Pipeline, Redirect, Separator, SimpleCommand};
 use crate::builtins::resolve::resolve_path;
 use crate::builtins::run_builtin;
-use crate::context::Context;
+use crate::context::{Context, LoopCtl};
 use crate::glob::glob_expand;
 use crate::io::{OutputSink, ShellIo, VecSink};
 #[cfg(feature = "native-proc")]
@@ -22,6 +22,12 @@ pub fn eval_streaming(
         let code = eval_pipeline(pipeline, ctx, &[], out, err);
         ctx.env.last_exit_code = code;
         last_code = code;
+
+        // A pending `break`/`continue` stops the rest of this list so it can
+        // propagate up to the enclosing loop evaluator.
+        if ctx.loop_ctl.is_some() {
+            break;
+        }
 
         match sep {
             Separator::And => {
@@ -144,9 +150,88 @@ fn eval_compound(
                 None => 0,
             }
         }
-        // Loops and case land in Phases C/D.
-        _ => unreachable!("only `if` is produced by the parser in Phase B"),
+        CompoundCommand::While { cond, body } => eval_while(cond, body, false, ctx, out, err),
+        CompoundCommand::Until { cond, body } => eval_while(cond, body, true, ctx, out, err),
+        CompoundCommand::For { var, words, body } => eval_for(var, words, body, ctx, out, err),
+        // `case` lands in Phase D.
+        CompoundCommand::Case { .. } => {
+            unreachable!("`case` is not produced by the parser until Phase D")
+        }
     }
+}
+
+/// `while`/`until` loop. `negate` flips the condition sense for `until`.
+fn eval_while(
+    cond: &List,
+    body: &List,
+    negate: bool,
+    ctx: &mut Context,
+    out: &mut dyn OutputSink,
+    err: &mut dyn OutputSink,
+) -> i32 {
+    use std::sync::atomic::Ordering;
+    ctx.loop_depth += 1;
+    let mut code = 0;
+    loop {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let cond_code = eval_streaming(cond, ctx, out, err);
+        ctx.env.last_exit_code = cond_code;
+        let run = if negate {
+            cond_code != 0
+        } else {
+            cond_code == 0
+        };
+        if !run {
+            break;
+        }
+        code = eval_streaming(body, ctx, out, err);
+        match ctx.loop_ctl.take() {
+            Some(LoopCtl::Break) => break,
+            Some(LoopCtl::Continue) => continue,
+            None => {}
+        }
+    }
+    ctx.loop_depth -= 1;
+    code
+}
+
+/// `for var in words; do body; done`.
+fn eval_for(
+    var: &str,
+    words: &[String],
+    body: &List,
+    ctx: &mut Context,
+    out: &mut dyn OutputSink,
+    err: &mut dyn OutputSink,
+) -> i32 {
+    use std::sync::atomic::Ordering;
+    // Expand the word list the same way command arguments are expanded:
+    // variable/command/arith substitution + field splitting + globbing.
+    let mut items: Vec<String> = Vec::new();
+    for w in words {
+        for e in crate::expand::expand_word_ctx(w, ctx, err) {
+            items.extend(glob_expand(&e, ctx.vfs.as_ref(), &ctx.env.cwd));
+        }
+    }
+
+    ctx.loop_depth += 1;
+    let mut code = 0;
+    for item in items {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        ctx.env.set(var.to_string(), item);
+        code = eval_streaming(body, ctx, out, err);
+        match ctx.loop_ctl.take() {
+            Some(LoopCtl::Break) => break,
+            Some(LoopCtl::Continue) => continue,
+            None => {}
+        }
+    }
+    ctx.loop_depth -= 1;
+    code
 }
 
 /// Multi-segment pipeline executor. For each adjacent pair of external

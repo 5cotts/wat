@@ -173,10 +173,13 @@ impl Parser {
         if let Token::Word(w) = self.peek() {
             match w.as_str() {
                 "if" => return Ok(Command::Compound(self.parse_if()?)),
+                "while" => return Ok(Command::Compound(self.parse_while(false)?)),
+                "until" => return Ok(Command::Compound(self.parse_while(true)?)),
+                "for" => return Ok(Command::Compound(self.parse_for()?)),
                 // A terminator keyword in command position with no open
                 // construct is a syntax error (we'd otherwise treat it as a
                 // command name and fail with "command not found").
-                "then" | "elif" | "else" | "fi" => {
+                "then" | "elif" | "else" | "fi" | "do" | "done" => {
                     return Err(ParseError {
                         message: format!("unexpected '{}'", w),
                         offset: self.offset(),
@@ -218,6 +221,73 @@ impl Parser {
             branches,
             else_body,
         })
+    }
+
+    /// `do body done`, shared by all loops.
+    fn parse_do_group(&mut self) -> Result<List, ParseError> {
+        self.expect_keyword("do")?;
+        let body = self.parse_list_until(&["done"])?;
+        self.expect_keyword("done")?;
+        Ok(body)
+    }
+
+    /// `while cond; do body; done` (or `until` when `negate` is true).
+    fn parse_while(&mut self, negate: bool) -> Result<CompoundCommand, ParseError> {
+        self.advance(); // consume `while` / `until`
+        let cond = self.parse_list_until(&["do"])?;
+        let body = self.parse_do_group()?;
+        Ok(if negate {
+            CompoundCommand::Until { cond, body }
+        } else {
+            CompoundCommand::While { cond, body }
+        })
+    }
+
+    /// `for NAME [in word...]; do body; done`.
+    fn parse_for(&mut self) -> Result<CompoundCommand, ParseError> {
+        self.advance(); // consume `for`
+        let var = match self.peek().clone() {
+            Token::Word(w) => {
+                self.advance();
+                w
+            }
+            Token::Eof => {
+                return Err(ParseError {
+                    message: "expected variable name after `for`".to_string(),
+                    offset: self.offset(),
+                    incomplete: true,
+                });
+            }
+            other => {
+                return Err(ParseError {
+                    message: format!(
+                        "expected variable name after `for`, found '{}'",
+                        other.display()
+                    ),
+                    offset: self.offset(),
+                    incomplete: false,
+                });
+            }
+        };
+
+        // Optional `in word...`. The word list ends at a separator or `do`.
+        let mut words = Vec::new();
+        if self.at_keyword("in") {
+            self.advance();
+            while let Token::Word(w) = self.peek() {
+                if w == "do" {
+                    break;
+                }
+                words.push(w.clone());
+                self.advance();
+            }
+        }
+        // Skip separators between the header and `do`.
+        while matches!(self.peek(), Token::Semicolon | Token::Newline) {
+            self.advance();
+        }
+        let body = self.parse_do_group()?;
+        Ok(CompoundCommand::For { var, words, body })
     }
 
     fn parse_simple_command(&mut self) -> Result<SimpleCommand, ParseError> {
@@ -392,6 +462,42 @@ mod tests {
             "stray fi should be a hard error: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn parse_for_structure() {
+        let list = parse("for x in a b c; do echo $x; done").unwrap();
+        match only_command(&list) {
+            Command::Compound(CompoundCommand::For { var, words, .. }) => {
+                assert_eq!(var, "x");
+                assert_eq!(words, &["a".to_string(), "b".to_string(), "c".to_string()]);
+            }
+            other => panic!("expected for, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_while_and_until() {
+        assert!(matches!(
+            only_command(&parse("while true; do echo x; done").unwrap()),
+            Command::Compound(CompoundCommand::While { .. })
+        ));
+        assert!(matches!(
+            only_command(&parse("until false; do echo x; done").unwrap()),
+            Command::Compound(CompoundCommand::Until { .. })
+        ));
+    }
+
+    #[test]
+    fn unterminated_loops_are_incomplete() {
+        assert!(parse("while true; do echo x").unwrap_err().incomplete);
+        assert!(parse("for x in a b; do echo $x").unwrap_err().incomplete);
+        assert!(parse("for x in a b").unwrap_err().incomplete);
+    }
+
+    #[test]
+    fn stray_done_is_hard_error() {
+        assert!(!parse("done").unwrap_err().incomplete);
     }
 
     fn cmd(name: &str, args: &[&str]) -> Command {

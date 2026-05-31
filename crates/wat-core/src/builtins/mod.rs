@@ -1,5 +1,5 @@
 use crate::builtins::resolve::resolve_path;
-use crate::context::Context;
+use crate::context::{Context, LoopCtl};
 use crate::io::ShellIo;
 use crate::vfs::FileType;
 
@@ -28,6 +28,8 @@ pub fn run_builtin<'a>(
         "clear" => Some(clear(io)),
         "true" => Some(0),
         "false" => Some(1),
+        "break" => Some(loop_ctl_builtin(LoopCtl::Break, "break", ctx, io)),
+        "continue" => Some(loop_ctl_builtin(LoopCtl::Continue, "continue", ctx, io)),
         // File builtins
         "ls" => Some(ls(args, ctx, io)),
         "cat" => Some(cat(args, ctx, io)),
@@ -86,6 +88,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "clear"
             | "true"
             | "false"
+            | "break"
+            | "continue"
             | "ls"
             | "cat"
             | "mkdir"
@@ -113,6 +117,20 @@ pub fn is_builtin(name: &str) -> bool {
             | "sh whoami.sh"
             | "__konami__"
     )
+}
+
+/// `break` / `continue`: request loop control. Only meaningful inside a loop;
+/// outside one it prints a diagnostic and is a no-op (exit 0), matching bash.
+fn loop_ctl_builtin(ctl: LoopCtl, name: &str, ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    if ctx.loop_depth == 0 {
+        io.write_err(&format!(
+            "wat: {}: only meaningful in a `for', `while', or `until' loop\n",
+            name
+        ));
+        return 0;
+    }
+    ctx.loop_ctl = Some(ctl);
+    0
 }
 
 fn history_builtin(ctx: &Context, io: &mut ShellIo) -> i32 {
