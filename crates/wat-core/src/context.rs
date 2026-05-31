@@ -5,6 +5,14 @@ use crate::vfs::{MemoryVfs, Vfs};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+/// Loop control requested by the `break`/`continue` builtins, consumed by the
+/// enclosing loop evaluator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopCtl {
+    Break,
+    Continue,
+}
+
 /// Combines the shell environment, VFS, history, and host capabilities
 /// (process spawning) — passed to eval and builtins.
 pub struct Context {
@@ -39,6 +47,12 @@ pub struct Context {
     /// recursion (`$($($(...)))`) blowing the stack. Not feature-gated:
     /// command substitution works on every target, including WASM.
     pub subst_depth: u32,
+    /// How many loops (`for`/`while`/`until`) are currently executing. The
+    /// `break`/`continue` builtins are only meaningful when this is > 0.
+    pub loop_depth: u32,
+    /// Pending loop control set by `break`/`continue`, consumed by the
+    /// enclosing loop evaluator.
+    pub loop_ctl: Option<LoopCtl>,
 }
 
 impl Context {
@@ -63,6 +77,8 @@ impl Context {
             #[cfg(feature = "native-pty")]
             pending_bg: None,
             subst_depth: 0,
+            loop_depth: 0,
+            loop_ctl: None,
         }
     }
 
@@ -83,6 +99,8 @@ impl Context {
             #[cfg(feature = "native-pty")]
             pending_bg: None,
             subst_depth: 0,
+            loop_depth: 0,
+            loop_ctl: None,
         }
     }
 }

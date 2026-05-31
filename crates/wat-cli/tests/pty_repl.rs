@@ -883,3 +883,43 @@ fn exit_warns_about_stopped_jobs_then_quits() {
     writer.write_all(b"exit\n").expect("exit 3");
     wait_for_wat_exit(child);
 }
+
+// ── Tier 5 / Phase C: an infinite loop is interruptible with Ctrl-C ───────
+
+#[test]
+fn ctrl_c_interrupts_infinite_loop() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // A compound command isn't PTY-routed; it runs on the buffered path. The
+    // loop checks the SIGINT cancel flag between iterations.
+    writer
+        .write_all(b"while true; do echo loop; done\n")
+        .expect("write loop");
+    // Wait until the loop is clearly running (some output produced).
+    let started = read_until(&mut reader, "loop", deadline());
+    assert!(
+        started.contains("loop"),
+        "loop did not start: {:?}",
+        started
+    );
+
+    // Ctrl-C (0x03) → terminal sends SIGINT → handler sets cancel → loop breaks.
+    std::thread::sleep(Duration::from_millis(100));
+    writer.write_all(b"\x03").expect("write ctrl-c");
+
+    // The shell returns to a prompt and is responsive again.
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+    writer.write_all(b"echo recovered\n").expect("write marker");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains("recovered"),
+        "shell not responsive after Ctrl-C of loop: {:?}",
+        after
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
