@@ -12,10 +12,18 @@ TUIs and line-editing work the same as in `bash` / `zsh`. Terminal
 resizes propagate to the child via SIGWINCH. Job control — `Ctrl-Z`,
 `jobs`, `fg`, `bg`, `kill %n`, and `cmd &` — works for PTY-routed single
 commands. Shell expansions include command substitution `$(...)` /
-`` `...` `` and integer arithmetic `$((...))`, both of which also work in
-the browser shell. Control flow — `if`/`elif`/`else`, `while`/`until`,
-`for`, `case`, with `break`/`continue` and the `test`/`[` builtin — is
-supported and can be typed across multiple lines.
+`` `...` ``, integer arithmetic `$((...))`, and `${VAR:-default}`-style
+parameter expansion, all of which also work in the browser shell. Control
+flow — `if`/`elif`/`else`, `while`/`until`, `for`, `case`, with
+`break`/`continue` and the `test`/`[` builtin — is supported and can be
+typed across multiple lines.
+
+wat is also scriptable: run a file (`wat script.sh args…`), a string
+(`wat -c '…'`), or a `#!/usr/bin/env wat` shebang. It has positional
+parameters (`$1`, `$@`, `$#`, `shift`, `set --`), shell functions with
+`return`, here-documents (`<<EOF`, `<<-`, `<<<`), and the scripting
+builtins `read`, `printf`, `eval`, `.`/`source`, `:`, and `set -e/-u/-x`.
+See [Writing scripts for wat](#writing-scripts-for-wat).
 
 It is **not** a login-shell replacement — see
 [Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
@@ -172,17 +180,17 @@ sequenceDiagram
 
 | File | Role in the running browser shell |
 |---|---|
-| `crates/wat-core/src/lexer.rs` | Tokenizes input into words, operators, quotes. |
-| `crates/wat-core/src/parser.rs` | Turns tokens into the AST: simple commands, pipelines, and compound commands (`if`/`while`/`until`/`for`/`case`). Reports `ParseError.incomplete` for open constructs (the multi-line-continuation hook). |
-| `crates/wat-core/src/ast.rs` | AST node definitions — a recursive statement tree (`Command::Simple` / `Command::Compound`). |
-| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines and compound commands, wires stdin/stdout. `eval_capture_stdout` runs a sub-pipeline and captures stdout for command substitution. |
+| `crates/wat-core/src/lexer.rs` | Tokenizes input into words, operators, quotes, and here-doc bodies. Brackets single-/double-quoted spans with internal markers so the expander/globber can honor quoting; collects `<<`/`<<-`/`<<<` bodies. |
+| `crates/wat-core/src/parser.rs` | Turns tokens into the AST: simple commands, pipelines, compound commands (`if`/`while`/`until`/`for`/`case`/`{ }`), and function definitions. Reports `ParseError.incomplete` for open constructs (the multi-line-continuation hook). |
+| `crates/wat-core/src/ast.rs` | AST node definitions — a recursive statement tree (`Command::Simple` / `Command::Compound` / `Command::FunctionDef`), redirects incl. here-docs/here-strings. |
+| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines, compound commands, and function calls, wires stdin/stdout, and honors `set -e/-u/-x`. `eval_capture_stdout` runs a sub-pipeline and captures stdout for command substitution. |
 | `crates/wat-core/src/builtins/` | Each builtin (`echo`, `cd`, `ls`, `cat`, `test`/`[`, `break`/`continue`, easter eggs, …). |
 | `crates/wat-core/src/builtins/test_cmd.rs` | The `test` / `[` builtin (string/integer/file conditions). |
 | `crates/wat-core/src/vfs.rs` | In-memory virtual filesystem (the only VFS used in the browser). |
 | `crates/wat-core/src/env.rs` | Environment vars + working directory. |
-| `crates/wat-core/src/expand.rs` | Word expansion: `~`, `$VAR`/`${VAR}`/`$?`, quoting, command substitution `$(...)`/`` `...` `` and arithmetic `$((...))`, plus field splitting. `expand_word` is the pure (no-command) form; `expand_word_ctx` can run sub-pipelines. |
+| `crates/wat-core/src/expand.rs` | Word expansion: `~`, `$VAR`/`${VAR}`/`$?`, positional params (`$1`/`$@`/`$#`), `${VAR:-…}`-style parameter expansion, quoting, command substitution `$(...)`/`` `...` `` and arithmetic `$((...))`, plus field splitting. `expand_word` is the pure (no-command) form; `expand_word_ctx` can run sub-pipelines. |
 | `crates/wat-core/src/arith.rs` | Integer arithmetic evaluator (`i64`, C-like precedence) for `$((...))`. |
-| `crates/wat-core/src/glob.rs` | Pattern matching for `*` / `?`. |
+| `crates/wat-core/src/glob.rs` | Pattern matching for `*` / `?` / `[…]` (quote-protected metacharacters stay literal). |
 | `crates/wat-core/src/complete.rs` | Tab-completion candidates. |
 | `crates/wat-core/src/history.rs` | Command history (powers ↑/↓). |
 | `crates/wat-core/src/io.rs` | `OutputSink` trait, `ShellIo` buffers + `emit_side_effect()` (writes `OSC 9999;{json}\x07`). |
@@ -237,8 +245,11 @@ README.md` all work as expected.
 **Do not make this your login shell.** wat explicitly does *not*
 implement:
 
-- **Startup files, aliases, completion for external commands, here-docs,
-  functions, arrays, arithmetic expansion, `set -o` flags.** Not in scope.
+- **Startup files (`~/.watrc`), aliases, completion for external
+  commands, arrays, `select`, subshells `( … )`, `[[ … ]]`.** Not in
+  scope. (Functions, here-docs, arithmetic, positional parameters, and
+  `set -e/-u/-x` *are* implemented — see
+  [Writing scripts for wat](#writing-scripts-for-wat).)
 
 Job control (`Ctrl-Z`, `fg`, `bg`, `jobs`, `kill %n`, `cmd &`) is
 implemented for PTY-routed single commands. Exiting with stopped jobs
@@ -314,8 +325,8 @@ Foreground commands enter the drive loop and can be stopped with `Ctrl-Z`.
 ### Expansions
 
 Each word on the command line is expanded before the command runs, in this
-order: tilde → `$VAR`/`${VAR}`/`$?` → command substitution / arithmetic →
-field splitting → globbing.
+order: tilde → parameter (`$VAR`/`${VAR}`/`$?`/`$1`/`$@`) → command
+substitution / arithmetic → field splitting → globbing.
 
 - **Command substitution** — `$(cmd)` and `` `cmd` `` run `cmd`, capture its
   **stdout** (stderr still reaches the terminal), strip trailing newlines, and
@@ -331,6 +342,15 @@ field splitting → globbing.
   (bare `N` or `$N`; undefined/non-numeric → `0`). Overflow wraps; division or
   modulo by zero prints a diagnostic and yields an empty result. The result is
   always a single word.
+- **Positional parameters** — `$0` (shell/script name), `$1`…`$9` and
+  `${10}`+, `$#` (count), and `$@`/`$*` (all params; `"$@"` expands to one
+  field per parameter). Set with `set -- a b c` and rotated with `shift`.
+- **Parameter expansion** — `${VAR}`, and the operators `${VAR:-word}` /
+  `${VAR:=word}` / `${VAR:?word}` / `${VAR:+word}` (the `:` forms also act
+  on an empty value; drop the `:` to act only when unset), prefix/suffix
+  trimming `${VAR#pat}` / `${VAR##pat}` / `${VAR%pat}` / `${VAR%%pat}`
+  (glob patterns), and length `${#VAR}`. `${VAR:=word}` assigns back to the
+  shell; `${VAR:?word}` reports an error when unset.
 - **`$?`** after a command reflects that command's own exit status, not any
   substitution it contained.
 
@@ -347,10 +367,11 @@ shell — an inner builtin runs against the in-memory VFS; an inner external
 hits the no-op process host and yields empty output, exactly like a top-level
 external in WASM. Nesting is capped (32 levels) to bound recursion.
 
-Known limitations: single quotes do **not** suppress expansion (`'$(x)'` is
-still run), matching the existing `'$VAR'` behavior; `${VAR:-default}`-style
-parameter expansion and here-documents are not implemented (see follow-ups in
-the Tier 4/5 plans).
+**Quoting.** Single quotes are fully literal — `'$x'`, `'$(cmd)'`,
+`'$((1+1))'`, `'~'`, and `'*'` are all passed through verbatim. Double
+quotes allow `$`/`$(…)` expansion but suppress word splitting and globbing,
+so `"$x"` is a single field and `"*"` stays literal. A quoted keyword
+(`'if'`) is a command name, not the keyword.
 
 ### Control flow
 
@@ -390,9 +411,71 @@ case "$1" in start) run;; stop) halt;; *) echo "usage: ...";; esac
   in-progress command.
 
 Like the expansions, this is pure `wat-core`, so it all works in the browser
-shell too. Not implemented (Tier 6 candidates): functions / `return`,
-positional parameters (`$1`, `$@`), subshells `( … )`, `select`, `[[ … ]]`,
-multi-level `break N`, and `${VAR:-default}` parameter expansion.
+shell too. Functions, `return`, brace groups `{ …; }`, and positional
+parameters are also supported (see [Writing scripts for wat](#writing-scripts-for-wat)).
+Not implemented: subshells `( … )`, `select`, `[[ … ]]`, and multi-level
+`break N`.
+
+## Writing scripts for wat
+
+wat runs scripts as well as interactive input. Three ways to invoke it:
+
+```sh
+wat script.sh alice bob     # run a file; $1=alice, $2=bob, $0=script.sh
+wat -c 'echo "$1"' x a b     # run a string; $0=x, $1=a, $2=b
+echo 'echo hi' | wat         # read the script from stdin
+```
+
+A script can also start with a shebang and be executed directly:
+
+```sh
+#!/usr/bin/env wat
+```
+
+From an interactive session, `.`/`source file` runs a script in the
+**current** shell, so the functions and variables it defines persist.
+
+### Scripting features
+
+- **Positional parameters** `$0 $1 … $# $@ $*`, `set -- a b c`, `shift [n]`.
+- **Functions** — `name() { …; }` or `function name { …; }`; call like any
+  command (`$1`, `$@` inside refer to the call's arguments). `return [n]`
+  ends the function with status `n`.
+- **Parameter expansion** — `${VAR:-default}`, `:=`, `:?`, `:+`, prefix/suffix
+  trimming `#`/`##`/`%`/`%%`, and length `${#VAR}`.
+- **Here-documents** — `<<EOF` (expanded body), `<<'EOF'` (literal body),
+  `<<-EOF` (strips leading tabs), and here-strings `<<<word`.
+- **Builtins** — `:` (no-op), `printf` (`%s %d %i %x %%`, `\n \t \r`,
+  argument cycling), `read [-r] [NAME…]`, `eval`, `.`/`source`, plus
+  `set -e` (errexit), `set -u` (nounset), and `set -x` (xtrace).
+
+### Example
+
+```sh
+#!/usr/bin/env wat
+set -e
+greet() { printf 'hello, %s\n' "$1"; }
+for name in "$@"; do
+  case $name in
+    -*) continue ;;
+    *)  greet "$name" ;;
+  esac
+done
+count=$#
+echo "got ${count} arg(s); first=${1:-none}"
+cat <<EOF
+done at depth $count
+EOF
+```
+
+Run as `wat greet.sh alice bob`:
+
+```
+hello, alice
+hello, bob
+got 2 arg(s); first=alice
+done at depth 2
+```
 
 ## Adding a builtin
 
