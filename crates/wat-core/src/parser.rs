@@ -1,4 +1,4 @@
-use crate::ast::{Command, List, Pipeline, Redirect, Separator, SimpleCommand};
+use crate::ast::{Command, CompoundCommand, List, Pipeline, Redirect, Separator, SimpleCommand};
 use crate::lexer::{lex, LexError, Spanned, Token};
 
 /// A parse error with a byte offset and human-readable message. `incomplete`
@@ -66,11 +66,48 @@ impl Parser {
     }
 
     fn parse_list(&mut self) -> Result<List, ParseError> {
+        self.parse_list_until(&[])
+    }
+
+    /// True if the next token is one of `stops` in command position (a bare
+    /// keyword like `then`/`fi`/`done` terminating the current compound body).
+    fn at_stop_word(&self, stops: &[&str]) -> bool {
+        matches!(self.peek(), Token::Word(w) if stops.contains(&w.as_str()))
+    }
+
+    fn at_keyword(&self, kw: &str) -> bool {
+        matches!(self.peek(), Token::Word(w) if w == kw)
+    }
+
+    /// Consume an expected keyword. EOF → `incomplete` (the REPL keeps reading);
+    /// any other token → a hard syntax error.
+    fn expect_keyword(&mut self, kw: &str) -> Result<(), ParseError> {
+        if self.at_keyword(kw) {
+            self.advance();
+            Ok(())
+        } else if *self.peek() == Token::Eof {
+            Err(ParseError {
+                message: format!("expected '{}'", kw),
+                offset: self.offset(),
+                incomplete: true,
+            })
+        } else {
+            Err(ParseError {
+                message: format!("expected '{}', found '{}'", kw, self.peek().display()),
+                offset: self.offset(),
+                incomplete: false,
+            })
+        }
+    }
+
+    /// Parse a list of pipelines, stopping (without consuming) at EOF or at a
+    /// `stops` keyword in command position. Top-level parsing passes no stops.
+    fn parse_list_until(&mut self, stops: &[&str]) -> Result<List, ParseError> {
         let mut items = Vec::new();
 
         self.skip_newlines();
 
-        while *self.peek() != Token::Eof {
+        while *self.peek() != Token::Eof && !self.at_stop_word(stops) {
             let pipeline = self.parse_pipeline()?;
             let sep = match self.peek() {
                 Token::Semicolon => {
@@ -130,11 +167,57 @@ impl Parser {
         Ok(Pipeline(commands))
     }
 
-    /// Parse one command. For now every command is a simple command; Phase B+
-    /// will dispatch to compound-command parsers when a control-flow keyword
-    /// appears in command position.
+    /// Parse one command: a compound command if a control-flow keyword is in
+    /// command position, otherwise a simple command.
     fn parse_command(&mut self) -> Result<Command, ParseError> {
+        if let Token::Word(w) = self.peek() {
+            match w.as_str() {
+                "if" => return Ok(Command::Compound(self.parse_if()?)),
+                // A terminator keyword in command position with no open
+                // construct is a syntax error (we'd otherwise treat it as a
+                // command name and fail with "command not found").
+                "then" | "elif" | "else" | "fi" => {
+                    return Err(ParseError {
+                        message: format!("unexpected '{}'", w),
+                        offset: self.offset(),
+                        incomplete: false,
+                    });
+                }
+                _ => {}
+            }
+        }
         Ok(Command::Simple(self.parse_simple_command()?))
+    }
+
+    /// `if cond; then body; [elif cond; then body;]* [else body;] fi`.
+    fn parse_if(&mut self) -> Result<CompoundCommand, ParseError> {
+        self.advance(); // consume `if`
+        let mut branches = Vec::new();
+
+        // `if` and each `elif` introduce a (condition, then-body) pair.
+        loop {
+            let cond = self.parse_list_until(&["then"])?;
+            self.expect_keyword("then")?;
+            let body = self.parse_list_until(&["elif", "else", "fi"])?;
+            branches.push((cond, body));
+            if !self.at_keyword("elif") {
+                break;
+            }
+            self.advance(); // consume `elif`
+        }
+
+        let else_body = if self.at_keyword("else") {
+            self.advance();
+            Some(self.parse_list_until(&["fi"])?)
+        } else {
+            None
+        };
+
+        self.expect_keyword("fi")?;
+        Ok(CompoundCommand::If {
+            branches,
+            else_body,
+        })
     }
 
     fn parse_simple_command(&mut self) -> Result<SimpleCommand, ParseError> {
@@ -257,6 +340,58 @@ mod tests {
             Command::Simple(sc) => sc,
             Command::Compound(_) => panic!("expected a simple command"),
         }
+    }
+
+    fn only_command(list: &List) -> &Command {
+        &list.0[0].0 .0[0]
+    }
+
+    #[test]
+    fn parse_if_structure() {
+        let list = parse("if true; then echo a; else echo b; fi").unwrap();
+        match only_command(&list) {
+            Command::Compound(CompoundCommand::If {
+                branches,
+                else_body,
+            }) => {
+                assert_eq!(branches.len(), 1);
+                assert!(else_body.is_some());
+            }
+            other => panic!("expected if, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_if_elif_branches() {
+        let list = parse("if a; then x; elif b; then y; elif c; then z; fi").unwrap();
+        match only_command(&list) {
+            Command::Compound(CompoundCommand::If { branches, .. }) => {
+                assert_eq!(branches.len(), 3); // if + 2 elif
+            }
+            other => panic!("expected if, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unterminated_if_is_incomplete() {
+        let err = parse("if true; then echo x").unwrap_err();
+        assert!(err.incomplete, "expected incomplete, got: {:?}", err);
+    }
+
+    #[test]
+    fn missing_then_is_incomplete_at_eof() {
+        let err = parse("if true").unwrap_err();
+        assert!(err.incomplete, "expected incomplete, got: {:?}", err);
+    }
+
+    #[test]
+    fn stray_fi_is_hard_error() {
+        let err = parse("fi").unwrap_err();
+        assert!(
+            !err.incomplete,
+            "stray fi should be a hard error: {:?}",
+            err
+        );
     }
 
     fn cmd(name: &str, args: &[&str]) -> Command {
