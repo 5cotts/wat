@@ -9,7 +9,8 @@ The native CLI (`wat-cli`) can run real external programs (`git`, `ls`,
 cancellation. Interactive foreground commands (`vim`, `less`, `htop`,
 `python3`, `man`, etc.) run inside a real pseudo-terminal so full-screen
 TUIs and line-editing work the same as in `bash` / `zsh`. Terminal
-resizes propagate to the child via SIGWINCH.
+resizes propagate to the child via SIGWINCH. Job control — `Ctrl-Z`,
+`jobs`, `fg`, `bg`, and `cmd &` — works for PTY-routed single commands.
 
 It is **not** a login-shell replacement — see
 [Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
@@ -75,9 +76,9 @@ hosts [xterm.js](https://xtermjs.org) and forwards keystrokes into the WASM modu
 ```mermaid
 flowchart TB
   subgraph Rust["Rust workspace (cargo)"]
-    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval · builtins<br/>Vfs trait · ProcessHost trait · PtyHost trait · io"]
-    cli["<b>wat-cli</b> (bin)<br/>native REPL<br/>NativeVfs + NativeProcessHost + NativePtyHost<br/>signal-hook SIGINT + SIGWINCH<br/>crossterm raw mode"]
-    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell<br/>MemoryVfs + NoopProcessHost<br/>(no PtyHost — pty module not compiled)"]
+    core["<b>wat-core</b> (rlib)<br/>lexer · parser · eval · builtins<br/>Vfs trait · ProcessHost trait · PtyHost trait · JobTable · io"]
+    cli["<b>wat-cli</b> (bin)<br/>native REPL<br/>NativeVfs + NativeProcessHost + NativePtyHost<br/>signal-hook SIGINT + SIGWINCH + SIGCHLD<br/>crossterm raw mode · CancelPipe · job drive loop"]
+    wasm["<b>wat-wasm</b> (cdylib)<br/>#[wasm_bindgen] Shell<br/>MemoryVfs + NoopProcessHost<br/>(no PtyHost — pty/jobs modules not compiled)"]
     core --> cli
     core --> wasm
   end
@@ -180,7 +181,8 @@ sequenceDiagram
 | `crates/wat-core/src/io.rs` | `OutputSink` trait, `ShellIo` buffers + `emit_side_effect()` (writes `OSC 9999;{json}\x07`). |
 | `crates/wat-core/src/process.rs` | `ProcessHost` / `ChildProcess` / `Signal` traits; `NativeProcessHost` (gated on `native-proc`) and `NoopProcessHost` (default, WASM). |
 | `crates/wat-core/src/pty.rs` | `PtyHost` / `PtyChild` / `PtyDims` traits and `NativePtyHost` (gated on `native-pty`). WASM never compiles this — the module is gated out entirely so `portable-pty` stays out of the bundle. |
-| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. `cancel_flag()` exposes the SIGINT atomic; `with_pty_host`, `spawn_pty`, and `pty_eligible` drive the interactive PTY path. |
+| `crates/wat-core/src/jobs.rs` | `JobTable`, `Job`, `JobState`, `JobPty` — stopped and background job tracking (gated on `native-pty`). |
+| `crates/wat-core/src/shell.rs` | `Shell` facade — the entry point shared by CLI and WASM. `cancel_flag()` exposes the SIGINT atomic; `with_pty_host`, `spawn_pty`, `pty_eligible`, `is_background_cmd`, and `jobs()` drive the interactive PTY and job-control paths. |
 | `crates/wat-wasm/src/lib.rs` | `#[wasm_bindgen]` wrapper exposing `Shell::new/prompt/feed/complete/history_at` to JS. |
 | `crates/wat-cli/src/main.rs` | Native REPL (not used in browser). |
 | `web/index.html` | DOM scaffold: window chrome, `#terminal` mount, loader. |
@@ -228,15 +230,48 @@ README.md` all work as expected.
 **Do not make this your login shell.** wat explicitly does *not*
 implement:
 
-- **Job control.** No `Ctrl-Z`, no `&`, no `bg` / `fg` / `jobs`. Once a
-  command starts, it runs in the foreground until it exits or you
-  interrupt it. That's Tier 3.
 - **Startup files, aliases, completion for external commands, here-docs,
-  functions, arrays, arithmetic expansion, `set -o` flags.** Not in
-  scope.
+  functions, arrays, arithmetic expansion, `set -o` flags.** Not in scope.
+
+Job control (`Ctrl-Z`, `fg`, `bg`, `jobs`, `cmd &`) is implemented for
+PTY-routed single commands. See "Known limitations" below.
 
 Treat it as a credible *scratch* shell — fun to drive on purpose, not a
 replacement for `zsh`.
+
+### Known limitations
+
+- **Piped commands (`cmd1 | cmd2 …`) do not participate in job control.**
+  A `Ctrl-Z` while a pipeline is running suspends both `wat-cli` and all
+  children together (same process group as the grandparent shell), which
+  drops you back to the grandparent shell. Resuming with the grandparent's
+  `fg` works as expected. Fixing this would require putting pipeline
+  children in their own process group — out of scope.
+
+- **Background PTY jobs whose output exceeds ~64 KB will block.** When a
+  job is started with `&`, nobody reads from its PTY master. The child's
+  writes will fill the slave pipe buffer and the child will stall. Redirect
+  output to a file (via the piped path: `cmd > file.txt &` is not yet
+  supported, but `cmd > file &` can be routed through the buffered path by
+  using a redirect) if you need long-running background output capture.
+
+- **Single command per background job.** `cmd1 | cmd2 &` is not supported.
+
+### How job control works
+
+`Ctrl-Z` (`0x1a`) is forwarded in raw mode through the outer PTY to the
+inner PTY slave, where the terminal driver converts it to SIGTSTP for the
+foreground process group (`sleep`, `vim`, etc.). wat-cli detects the stop
+via a non-blocking `waitpid(WUNTRACED)` poll in the drive loop, registers
+the stopped job in a `JobTable`, and prints `[N]+ Stopped <cmd>` before
+returning to the REPL prompt.
+
+`fg` sends SIGCONT to the job's process group and re-enters the PTY drive
+loop. `bg` sends SIGCONT without re-entering. Background jobs (`cmd &`)
+skip the drive loop entirely; a SIGCHLD handler polls each background job's
+specific PID (not `waitpid(-1)`, which would race the foreground loop) and
+marks them `Done` when they exit. `Done` notifications appear at the top of
+the next REPL prompt.
 
 ### How PTY routing works
 
@@ -245,7 +280,7 @@ inside a PTY (interactive raw-mode path) or run through the buffered
 streaming path. The PTY path is used iff **all** of the following hold:
 
 1. The input parses to a single-command pipeline (no `|`, no `;`, no
-   `&&`/`||`).
+   `&&`/`||`) — with an optional trailing `&` for background.
 2. The command has no redirects (no `<`, `>`, `>>`, `2>`).
 3. The command name doesn't shadow a wat builtin.
 4. The command name resolves on `PATH`.
@@ -255,6 +290,10 @@ Otherwise the existing buffered path runs — so capture-style callers,
 scripts, pipelines, and redirection all behave the same as in Tier 1.
 The routing rule lives in `Shell::pty_eligible` so it stays in sync
 with the parser and the builtin set as both evolve.
+
+When a command is routed to the PTY path with a trailing `&` (background),
+the drive loop is skipped and the job is added to the job table immediately.
+Foreground commands enter the drive loop and can be stopped with `Ctrl-Z`.
 
 ## Adding a builtin
 
