@@ -17,6 +17,8 @@ pub enum Token {
     Redirect2Append,
     /// `;`
     Semicolon,
+    /// `;;` (case-arm terminator)
+    DSemi,
     /// `&&`
     And,
     /// `&`
@@ -40,6 +42,7 @@ impl Token {
             Token::RedirectOut => ">",
             Token::RedirectAppend => ">>",
             Token::Semicolon => ";",
+            Token::DSemi => ";;",
             Token::And => "&&",
             Token::Background => "&",
             Token::Or => "||",
@@ -172,11 +175,20 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 i += 1;
             }
             ';' => {
-                tokens.push(Spanned {
-                    token: Token::Semicolon,
-                    offset,
-                });
-                i += 1;
+                // `;;` is the case-arm terminator (one token); `;` separates.
+                if i + 1 < chars.len() && chars[i + 1] == ';' {
+                    tokens.push(Spanned {
+                        token: Token::DSemi,
+                        offset,
+                    });
+                    i += 2;
+                } else {
+                    tokens.push(Spanned {
+                        token: Token::Semicolon,
+                        offset,
+                    });
+                    i += 1;
+                }
             }
             '#' => {
                 // Comment: skip to end of line
@@ -831,6 +843,29 @@ mod tests {
     #[test]
     fn lex_unterminated_backtick_errors() {
         assert!(lex("echo `date").is_err());
+    }
+
+    #[test]
+    fn lex_double_semicolon() {
+        assert_eq!(
+            tokens("a;; b"),
+            vec![
+                Token::Word("a".into()),
+                Token::DSemi,
+                Token::Word("b".into()),
+                Token::Eof,
+            ]
+        );
+        // A single `;` is still a Semicolon.
+        assert_eq!(
+            tokens("a; b"),
+            vec![
+                Token::Word("a".into()),
+                Token::Semicolon,
+                Token::Word("b".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
