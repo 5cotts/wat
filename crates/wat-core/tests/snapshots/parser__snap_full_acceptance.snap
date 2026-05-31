@@ -12,7 +12,7 @@ List(
                             assignments: [],
                             name: "echo",
                             args: [
-                                "hello world",
+                                "\u{4}hello world\u{4}",
                             ],
                             redirects: [],
                         },

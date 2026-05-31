@@ -89,6 +89,25 @@ impl std::fmt::Display for LexError {
 /// idea as bash's internal CTLESC quoting bytes.)
 pub const QUOTED_SUBST_MARK: char = '\u{1}';
 
+/// Toggle marker bracketing a **single-quoted** span. Content between a pair of
+/// these is fully literal: the expander copies it verbatim (no `$`/`` ` ``/`~`
+/// expansion) and the globber treats it as non-pattern text. Stripped from the
+/// final word value.
+pub const LITERAL_MARK: char = '\u{2}';
+
+/// Toggle marker bracketing a **double-quoted** span. Expansion still happens
+/// inside (so `$VAR` resolves), but the result is protected from word splitting
+/// and pathname (glob) expansion. Stripped from the final word value.
+pub const DQUOTE_MARK: char = '\u{4}';
+
+/// Remove every internal quoting marker from a word, yielding the user-visible
+/// text. Called once a word has finished expansion/globbing.
+pub fn strip_quote_marks(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c != LITERAL_MARK && c != DQUOTE_MARK && c != QUOTED_SUBST_MARK)
+        .collect()
+}
+
 /// Tokenize a shell input string into a list of [`Spanned`] tokens ending with [`Token::Eof`].
 pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
     let mut tokens = Vec::new();
@@ -247,7 +266,9 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 // may continue past the closing quote (e.g. `'a'b`).
                 i += 1;
                 let start = i;
+                // Bracket the literal run so the expander/globber leave it alone.
                 let mut s = String::new();
+                s.push(LITERAL_MARK);
                 while i < chars.len() && chars[i] != '\'' {
                     s.push(chars[i]);
                     i += 1;
@@ -258,6 +279,7 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                         offset: byte_off!(start - 1),
                     });
                 }
+                s.push(LITERAL_MARK);
                 i += 1; // consume closing '
                 let s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens)?;
                 tokens.push(Spanned {
@@ -271,7 +293,10 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                 // hand off to extend_word after reading the quoted run.
                 i += 1;
                 let start = i;
+                // Bracket the span so its expanded result is protected from
+                // word splitting and glob expansion (but `$` still expands).
                 let mut s = String::new();
+                s.push(DQUOTE_MARK);
                 while i < chars.len() && chars[i] != '"' {
                     // Substitution inside double quotes → marked for no-split.
                     if let Some(res) = try_consume_subst(&chars, &mut i, &byte_offsets) {
@@ -304,6 +329,7 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                         offset: byte_off!(start - 1),
                     });
                 }
+                s.push(DQUOTE_MARK);
                 i += 1; // consume closing "
                 let s = extend_word(s, &chars, &byte_offsets, &mut i, &mut tokens)?;
                 tokens.push(Spanned {
@@ -620,16 +646,19 @@ fn extend_word(
             ' ' | '\t' | '\n' | '|' | '&' | '<' | '>' | ';' => break,
             '\'' => {
                 *i += 1;
+                s.push(LITERAL_MARK);
                 while *i < chars.len() && chars[*i] != '\'' {
                     s.push(chars[*i]);
                     *i += 1;
                 }
+                s.push(LITERAL_MARK);
                 if *i < chars.len() {
                     *i += 1; // consume closing '
                 }
             }
             '"' => {
                 *i += 1;
+                s.push(DQUOTE_MARK);
                 while *i < chars.len() && chars[*i] != '"' {
                     // A substitution inside double quotes is marked so the
                     // expander knows its output must not be word-split.
@@ -657,6 +686,7 @@ fn extend_word(
                         *i += 1;
                     }
                 }
+                s.push(DQUOTE_MARK);
                 if *i < chars.len() {
                     *i += 1; // consume closing "
                 }
@@ -679,8 +709,49 @@ fn extend_word(
 mod tests {
     use super::*;
 
+    /// Tokens with the single/double-quote *region* markers stripped, so the
+    /// structural assertions below read cleanly. The `QUOTED_SUBST_MARK` is
+    /// kept (a dedicated test asserts it).
     fn tokens(input: &str) -> Vec<Token> {
+        lex(input)
+            .unwrap()
+            .into_iter()
+            .map(|s| match s.token {
+                Token::Word(w) => Token::Word(
+                    w.chars()
+                        .filter(|&c| c != LITERAL_MARK && c != DQUOTE_MARK)
+                        .collect(),
+                ),
+                other => other,
+            })
+            .collect()
+    }
+
+    /// Raw tokens with every marker intact.
+    fn raw_tokens(input: &str) -> Vec<Token> {
         lex(input).unwrap().into_iter().map(|s| s.token).collect()
+    }
+
+    #[test]
+    fn single_quote_emits_literal_markers() {
+        let toks = raw_tokens("'$x'");
+        match &toks[0] {
+            Token::Word(w) => {
+                assert_eq!(w, &format!("{m}$x{m}", m = LITERAL_MARK));
+            }
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn double_quote_emits_dquote_markers() {
+        let toks = raw_tokens("\"$x\"");
+        match &toks[0] {
+            Token::Word(w) => {
+                assert_eq!(w, &format!("{m}$x{m}", m = DQUOTE_MARK));
+            }
+            other => panic!("expected Word, got {:?}", other),
+        }
     }
 
     #[test]

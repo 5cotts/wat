@@ -956,7 +956,11 @@ mod tests {
 
         let (pipe0, sep0) = &list.0[0];
         assert_eq!(sep0, &Separator::And);
-        assert_eq!(pipe0.0[0], cmd("echo", &["hello world"]));
+        // The double-quoted arg keeps its quote-region markers in the AST;
+        // they are stripped during expansion, not parsing.
+        let dq = crate::lexer::DQUOTE_MARK;
+        let quoted = format!("{dq}hello world{dq}");
+        assert_eq!(pipe0.0[0], cmd("echo", &[&quoted]));
         assert_eq!(
             pipe0.0[1],
             cmd_r("grep", &["h"], vec![Redirect::Out("out.txt".into())])

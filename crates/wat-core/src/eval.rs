@@ -113,6 +113,7 @@ fn expand_command_words(
     let name = crate::expand::expand_word_ctx(&cmd.name, ctx, err)
         .into_iter()
         .next()
+        .map(|w| crate::lexer::strip_quote_marks(&w))
         .unwrap_or_default();
     let mut args = Vec::new();
     for a in &cmd.args {
