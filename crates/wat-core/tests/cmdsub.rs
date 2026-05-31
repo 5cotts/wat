@@ -200,3 +200,63 @@ fn split_result_is_globbed() {
     // And the raw pattern should be gone (it matched).
     assert!(!out.contains('*'), "pattern left unexpanded: {:?}", out);
 }
+
+// ── Tier 4 / Phase D: arithmetic expansion $((expr)) ─────────────────────
+
+#[test]
+fn arith_basic() {
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo $((1 + 2 * 3))"), "7\n");
+}
+
+#[test]
+fn arith_parens() {
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo $(( (1 + 2) * 3 ))"), "9\n");
+}
+
+#[test]
+fn arith_vars() {
+    let mut sh = shell();
+    feed(&mut sh, "export N=5");
+    assert_eq!(feed(&mut sh, "echo $((N * 2))"), "10\n");
+}
+
+#[test]
+fn arith_undefined_is_zero() {
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo $((UNDEF + 4))"), "4\n");
+}
+
+#[test]
+fn arith_modulo_and_unary() {
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo $((17 % 5))"), "2\n");
+    assert_eq!(feed(&mut sh, "echo $((-3 + 10))"), "7\n");
+}
+
+#[test]
+fn arith_div_by_zero_errors_without_crash() {
+    let mut sh = shell();
+    let out = feed(&mut sh, "echo [$((1 / 0))]");
+    // Diagnostic surfaces; the bad expansion yields nothing (no panic).
+    assert!(out.contains("division by zero"), "got: {:?}", out);
+    assert!(
+        out.contains("[]"),
+        "expected empty arith result, got: {:?}",
+        out
+    );
+}
+
+#[test]
+fn arith_nested_in_cmdsub() {
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo $(echo $((2 + 2)))"), "4\n");
+}
+
+#[test]
+fn arith_result_does_not_split() {
+    // An arithmetic result is a single field even unquoted.
+    let mut sh = shell();
+    assert_eq!(feed(&mut sh, "echo x$((1 + 1))y"), "x2y\n");
+}
