@@ -11,7 +11,9 @@ cancellation. Interactive foreground commands (`vim`, `less`, `htop`,
 TUIs and line-editing work the same as in `bash` / `zsh`. Terminal
 resizes propagate to the child via SIGWINCH. Job control — `Ctrl-Z`,
 `jobs`, `fg`, `bg`, `kill %n`, and `cmd &` — works for PTY-routed single
-commands.
+commands. Shell expansions include command substitution `$(...)` /
+`` `...` `` and integer arithmetic `$((...))`, both of which also work in
+the browser shell.
 
 It is **not** a login-shell replacement — see
 [Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
@@ -171,11 +173,12 @@ sequenceDiagram
 | `crates/wat-core/src/lexer.rs` | Tokenizes input into words, operators, quotes. |
 | `crates/wat-core/src/parser.rs` | Turns tokens into an AST of commands and pipelines. |
 | `crates/wat-core/src/ast.rs` | AST node definitions. |
-| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines, wires stdin/stdout. |
+| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines, wires stdin/stdout. `eval_capture_stdout` runs a sub-pipeline and captures stdout for command substitution. |
 | `crates/wat-core/src/builtins/` | Each builtin (`echo`, `cd`, `ls`, `cat`, easter eggs, …). |
 | `crates/wat-core/src/vfs.rs` | In-memory virtual filesystem (the only VFS used in the browser). |
 | `crates/wat-core/src/env.rs` | Environment vars + working directory. |
-| `crates/wat-core/src/expand.rs` | Variable expansion + quoting rules. |
+| `crates/wat-core/src/expand.rs` | Word expansion: `~`, `$VAR`/`${VAR}`/`$?`, quoting, command substitution `$(...)`/`` `...` `` and arithmetic `$((...))`, plus field splitting. `expand_word` is the pure (no-command) form; `expand_word_ctx` can run sub-pipelines. |
+| `crates/wat-core/src/arith.rs` | Integer arithmetic evaluator (`i64`, C-like precedence) for `$((...))`. |
 | `crates/wat-core/src/glob.rs` | Pattern matching for `*` / `?`. |
 | `crates/wat-core/src/complete.rs` | Tab-completion candidates. |
 | `crates/wat-core/src/history.rs` | Command history (powers ↑/↓). |
@@ -303,6 +306,39 @@ with the parser and the builtin set as both evolve.
 When a command is routed to the PTY path with a trailing `&` (background),
 the drive loop is skipped and the job is added to the job table immediately.
 Foreground commands enter the drive loop and can be stopped with `Ctrl-Z`.
+
+### Expansions
+
+Each word on the command line is expanded before the command runs, in this
+order: tilde → `$VAR`/`${VAR}`/`$?` → command substitution / arithmetic →
+field splitting → globbing.
+
+- **Command substitution** — `$(cmd)` and `` `cmd` `` run `cmd`, capture its
+  **stdout** (stderr still reaches the terminal), strip trailing newlines, and
+  splice the result. They nest (`$(echo $(echo x))`) and may contain full
+  pipelines (`$(ls | wc -l)`).
+- **Quoting & field splitting** — an *unquoted* substitution's output is split
+  on whitespace (space/tab/newline) into separate words, which are then
+  globbed; a *quoted* one (`"$(cmd)"`) stays a single word with its spacing and
+  newlines intact. Adjacent literals join the first/last split field, so
+  `x$(echo 'a b')y` yields `xa by`. (`$VAR` itself is not field-split.)
+- **Arithmetic** — `$((expr))` evaluates integer (`i64`) arithmetic with
+  C-like precedence: `+ - * / %`, unary `-`/`+`, parentheses, and variables
+  (bare `N` or `$N`; undefined/non-numeric → `0`). Overflow wraps; division or
+  modulo by zero prints a diagnostic and yields an empty result. The result is
+  always a single word.
+- **`$?`** after a command reflects that command's own exit status, not any
+  substitution it contained.
+
+These are pure `wat-core` features, so they work identically in the browser
+shell — an inner builtin runs against the in-memory VFS; an inner external
+hits the no-op process host and yields empty output, exactly like a top-level
+external in WASM. Nesting is capped (32 levels) to bound recursion.
+
+Known limitations: single quotes do **not** suppress expansion (`'$(x)'` is
+still run), matching the existing `'$VAR'` behavior; `${VAR:-default}`-style
+parameter expansion and here-documents are not implemented (see follow-ups in
+the Tier 4/5 plans).
 
 ## Adding a builtin
 
