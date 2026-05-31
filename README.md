@@ -13,7 +13,9 @@ resizes propagate to the child via SIGWINCH. Job control — `Ctrl-Z`,
 `jobs`, `fg`, `bg`, `kill %n`, and `cmd &` — works for PTY-routed single
 commands. Shell expansions include command substitution `$(...)` /
 `` `...` `` and integer arithmetic `$((...))`, both of which also work in
-the browser shell.
+the browser shell. Control flow — `if`/`elif`/`else`, `while`/`until`,
+`for`, `case`, with `break`/`continue` and the `test`/`[` builtin — is
+supported and can be typed across multiple lines.
 
 It is **not** a login-shell replacement — see
 [Use as a scratch shell on macOS](#use-as-a-scratch-shell-on-macos) below
@@ -171,10 +173,11 @@ sequenceDiagram
 | File | Role in the running browser shell |
 |---|---|
 | `crates/wat-core/src/lexer.rs` | Tokenizes input into words, operators, quotes. |
-| `crates/wat-core/src/parser.rs` | Turns tokens into an AST of commands and pipelines. |
-| `crates/wat-core/src/ast.rs` | AST node definitions. |
-| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines, wires stdin/stdout. `eval_capture_stdout` runs a sub-pipeline and captures stdout for command substitution. |
-| `crates/wat-core/src/builtins/` | Each builtin (`echo`, `cd`, `ls`, `cat`, easter eggs, …). |
+| `crates/wat-core/src/parser.rs` | Turns tokens into the AST: simple commands, pipelines, and compound commands (`if`/`while`/`until`/`for`/`case`). Reports `ParseError.incomplete` for open constructs (the multi-line-continuation hook). |
+| `crates/wat-core/src/ast.rs` | AST node definitions — a recursive statement tree (`Command::Simple` / `Command::Compound`). |
+| `crates/wat-core/src/eval.rs` | Walks the AST, runs pipelines and compound commands, wires stdin/stdout. `eval_capture_stdout` runs a sub-pipeline and captures stdout for command substitution. |
+| `crates/wat-core/src/builtins/` | Each builtin (`echo`, `cd`, `ls`, `cat`, `test`/`[`, `break`/`continue`, easter eggs, …). |
+| `crates/wat-core/src/builtins/test_cmd.rs` | The `test` / `[` builtin (string/integer/file conditions). |
 | `crates/wat-core/src/vfs.rs` | In-memory virtual filesystem (the only VFS used in the browser). |
 | `crates/wat-core/src/env.rs` | Environment vars + working directory. |
 | `crates/wat-core/src/expand.rs` | Word expansion: `~`, `$VAR`/`${VAR}`/`$?`, quoting, command substitution `$(...)`/`` `...` `` and arithmetic `$((...))`, plus field splitting. `expand_word` is the pure (no-command) form; `expand_word_ctx` can run sub-pipelines. |
@@ -292,7 +295,8 @@ inside a PTY (interactive raw-mode path) or run through the buffered
 streaming path. The PTY path is used iff **all** of the following hold:
 
 1. The input parses to a single-command pipeline (no `|`, no `;`, no
-   `&&`/`||`) — with an optional trailing `&` for background.
+   `&&`/`||`) — with an optional trailing `&` for background. A compound
+   command (`if`/`while`/`for`/`case`) is never PTY-routed.
 2. The command has no redirects (no `<`, `>`, `>>`, `2>`).
 3. The command name doesn't shadow a wat builtin.
 4. The command name resolves on `PATH`.
@@ -347,6 +351,48 @@ Known limitations: single quotes do **not** suppress expansion (`'$(x)'` is
 still run), matching the existing `'$VAR'` behavior; `${VAR:-default}`-style
 parameter expansion and here-documents are not implemented (see follow-ups in
 the Tier 4/5 plans).
+
+### Control flow
+
+The grammar (keywords are recognized only in command position, so `echo if`
+still prints `if`):
+
+```sh
+if list; then list; [elif list; then list;]* [else list;] fi
+while list; do list; done
+until list; do list; done
+for NAME [in word...]; do list; done
+case word in (pat[|pat]...) list ;; ... esac
+```
+
+Examples:
+
+```sh
+if test -f config; then echo found; else echo missing; fi
+for f in *.txt; do echo "$f"; done
+i=0; while test $i -lt 3; do echo $i; i=$((i + 1)); done
+case "$1" in start) run;; stop) halt;; *) echo "usage: ...";; esac
+```
+
+- **Conditions** are command lists; a branch/loop runs on exit status 0 (`while`)
+  or non-zero (`until`). The `test` / `[` builtin provides string (`-z`, `-n`,
+  `=`, `!=`), integer (`-eq -ne -lt -le -gt -ge`), and file (`-e -f -d`, via the
+  VFS) tests, plus `!` negation.
+- **`break` / `continue`** affect the innermost loop (single level). Loops poll
+  the Ctrl-C flag between iterations, so an infinite loop is interruptible.
+- **`case`** patterns are glob-matched (`*`, `?`, `[...]`), with `|` alternation
+  and an optional leading `(`; the first matching arm runs.
+- Compound commands run in the **current shell** (no subshell), so assignments
+  and `cd` inside them persist.
+- **Multi-line input**: an unfinished construct (or an unterminated quote /
+  `$(`) shows a continuation prompt (`> `) and keeps reading until it parses;
+  this works in the native REPL and the browser shell. `Ctrl-C` discards an
+  in-progress command.
+
+Like the expansions, this is pure `wat-core`, so it all works in the browser
+shell too. Not implemented (Tier 6 candidates): functions / `return`,
+positional parameters (`$1`, `$@`), subshells `( … )`, `select`, `[[ … ]]`,
+multi-level `break N`, and `${VAR:-default}` parameter expansion.
 
 ## Adding a builtin
 
