@@ -9,6 +9,12 @@ pub enum Redirect {
     In(String),
     /// `2> file`
     Err(String),
+    /// `<<DELIM` / `<<-DELIM` / `<<'DELIM'` here-document. `body` is the
+    /// collected text (leading tabs already stripped for `<<-`); `expand` is
+    /// false when the delimiter was quoted (the body is taken literally).
+    HereDoc { body: String, expand: bool },
+    /// `<<<word` here-string.
+    HereString(String),
 }
 
 /// A simple command with its leading variable assignments, name, arguments,

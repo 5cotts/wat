@@ -406,7 +406,7 @@ fn eval_pipeline_chained(
                 }
             };
             // Apply input redirect override if present.
-            let stdin_bytes = apply_input_redirect(cmd, ctx, stdin_bytes);
+            let stdin_bytes = apply_input_redirect(cmd, ctx, final_err, stdin_bytes);
             let has_out_redirect = cmd
                 .redirects
                 .iter()
@@ -452,11 +452,18 @@ fn eval_pipeline_chained(
         {
             // Apply input redirect by materializing the reader to bytes.
             let stdin = match current {
-                PipelineStdin::Bytes(b) => ChildStdin::Bytes(apply_input_redirect(cmd, ctx, b)),
+                PipelineStdin::Bytes(b) => {
+                    ChildStdin::Bytes(apply_input_redirect(cmd, ctx, final_err, b))
+                }
                 PipelineStdin::Reader(r) => {
-                    if cmd.redirects.iter().any(|x| matches!(x, Redirect::In(_))) {
-                        // Input redirect overrides upstream pipe.
-                        ChildStdin::Bytes(apply_input_redirect(cmd, ctx, Vec::new()))
+                    if cmd.redirects.iter().any(|x| {
+                        matches!(
+                            x,
+                            Redirect::In(_) | Redirect::HereDoc { .. } | Redirect::HereString(_)
+                        )
+                    }) {
+                        // An input redirect overrides the upstream pipe.
+                        ChildStdin::Bytes(apply_input_redirect(cmd, ctx, final_err, Vec::new()))
                     } else {
                         ChildStdin::Pipe(r)
                     }
@@ -613,18 +620,42 @@ fn eval_pipeline_chained(
     last_code
 }
 
-fn apply_input_redirect(cmd: &SimpleCommand, ctx: &Context, fallback: Vec<u8>) -> Vec<u8> {
-    cmd.redirects
-        .iter()
-        .find_map(|r| {
-            if let Redirect::In(path) = r {
+/// Resolve a command's standard input: a file redirect (`< file`), a
+/// here-document (`<<EOF`), or a here-string (`<<<word`). The here-doc body is
+/// parameter/command/arith-expanded unless its delimiter was quoted; the
+/// here-string word is always expanded. Returns `fallback` when there is no
+/// input redirect. The first input source on the command wins.
+fn apply_input_redirect(
+    cmd: &SimpleCommand,
+    ctx: &mut Context,
+    err: &mut dyn OutputSink,
+    fallback: Vec<u8>,
+) -> Vec<u8> {
+    for r in &cmd.redirects {
+        match r {
+            Redirect::In(path) => {
                 let full = resolve_path(path, &ctx.env.cwd);
-                ctx.vfs.read(&full).ok()
-            } else {
-                None
+                if let Ok(bytes) = ctx.vfs.read(&full) {
+                    return bytes;
+                }
             }
-        })
-        .unwrap_or(fallback)
+            Redirect::HereDoc { body, expand } => {
+                let text = if *expand {
+                    crate::expand::expand_value(body, ctx, err)
+                } else {
+                    body.clone()
+                };
+                return text.into_bytes();
+            }
+            Redirect::HereString(word) => {
+                let mut text = crate::expand::expand_value(word, ctx, err);
+                text.push('\n');
+                return text.into_bytes();
+            }
+            _ => {}
+        }
+    }
+    fallback
 }
 
 fn apply_output_redirects(
@@ -649,7 +680,8 @@ fn apply_output_redirects(
                 let full = resolve_path(path, &ctx.env.cwd);
                 let _ = ctx.vfs.write(&full, err_bytes);
             }
-            Redirect::In(_) => {}
+            // Input redirects are handled by `apply_input_redirect`.
+            Redirect::In(_) | Redirect::HereDoc { .. } | Redirect::HereString(_) => {}
         }
     }
 }
@@ -722,7 +754,7 @@ fn run_command(
         saved
     };
 
-    let stdin_bytes = apply_input_redirect(cmd, ctx, stdin_data.to_vec());
+    let stdin_bytes = apply_input_redirect(cmd, ctx, err_sink, stdin_data.to_vec());
 
     let has_out_redirect = cmd
         .redirects

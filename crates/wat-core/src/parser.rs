@@ -537,6 +537,15 @@ impl Parser {
                     let target = self.expect_word("expected filename after '2>>'")?;
                     redirects.push(Redirect::Err(target)); // append not tracked separately yet
                 }
+                Token::HereDoc(body, expand) => {
+                    self.advance();
+                    redirects.push(Redirect::HereDoc { body, expand });
+                }
+                Token::HereStringOp => {
+                    self.advance();
+                    let word = self.expect_word("expected word after '<<<'")?;
+                    redirects.push(Redirect::HereString(word));
+                }
                 _ => break,
             }
         }
