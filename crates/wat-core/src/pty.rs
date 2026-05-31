@@ -37,6 +37,10 @@ pub trait PtyChild: Send {
     fn signal(&mut self, sig: Signal) -> io::Result<()>;
     /// Return the child's PID, if known.
     fn pid(&self) -> Option<i32>;
+    /// Clone the master's reader. Allows re-entering the drive loop after a
+    /// stopped job is resumed via `fg` — the original reader is in a blocked
+    /// background thread; this produces a fresh one from the same master fd.
+    fn clone_reader(&mut self) -> io::Result<Box<dyn io::Read + Send>>;
 }
 
 /// Host abstraction for launching commands inside a PTY. Separate from
@@ -257,6 +261,14 @@ mod native {
                     "signal not supported on this platform",
                 ))
             }
+        }
+
+        fn clone_reader(&mut self) -> io::Result<Box<dyn io::Read + Send>> {
+            self.master
+                .lock()
+                .expect("master mutex poisoned")
+                .try_clone_reader()
+                .map_err(|e| io::Error::other(e.to_string()))
         }
     }
 

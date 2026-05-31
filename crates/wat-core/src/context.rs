@@ -24,6 +24,17 @@ pub struct Context {
     /// and falls back to the piped `ProcessHost` path.
     #[cfg(feature = "native-pty")]
     pub pty_host: Option<Box<dyn crate::pty::PtyHost>>,
+    /// Job table for stopped/background PTY children. Shared with wat-cli
+    /// via `Shell::jobs()`.
+    #[cfg(feature = "native-pty")]
+    pub jobs: Arc<std::sync::Mutex<crate::jobs::JobTable>>,
+    /// Requested foreground job id, set by the `fg` builtin and consumed
+    /// by the REPL loop in wat-cli.
+    #[cfg(feature = "native-pty")]
+    pub pending_fg: Option<u32>,
+    /// Requested background-resume job id, set by the `bg` builtin.
+    #[cfg(feature = "native-pty")]
+    pub pending_bg: Option<u32>,
 }
 
 impl Context {
@@ -41,6 +52,12 @@ impl Context {
             cancel: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "native-pty")]
             pty_host: None,
+            #[cfg(feature = "native-pty")]
+            jobs: Arc::new(std::sync::Mutex::new(crate::jobs::JobTable::new())),
+            #[cfg(feature = "native-pty")]
+            pending_fg: None,
+            #[cfg(feature = "native-pty")]
+            pending_bg: None,
         }
     }
 
@@ -54,6 +71,12 @@ impl Context {
             cancel: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "native-pty")]
             pty_host: None,
+            #[cfg(feature = "native-pty")]
+            jobs: Arc::new(std::sync::Mutex::new(crate::jobs::JobTable::new())),
+            #[cfg(feature = "native-pty")]
+            pending_fg: None,
+            #[cfg(feature = "native-pty")]
+            pending_bg: None,
         }
     }
 }

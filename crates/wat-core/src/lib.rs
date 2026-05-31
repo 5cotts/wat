@@ -8,6 +8,8 @@ pub mod expand;
 pub mod glob;
 pub mod history;
 pub mod io;
+#[cfg(feature = "native-pty")]
+pub mod jobs;
 pub mod lexer;
 pub mod parser;
 pub mod process;

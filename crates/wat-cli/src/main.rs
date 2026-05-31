@@ -1,9 +1,10 @@
 use is_terminal::IsTerminal;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use wat_core::io::{StderrSink, StdoutSink};
 use wat_core::process::NativeProcessHost;
-use wat_core::pty::{NativePtyHost, PtyDims};
+use wat_core::pty::{NativePtyHost, PtyChild, PtyDims};
 use wat_core::Shell;
 
 fn main() {
@@ -11,10 +12,6 @@ fn main() {
         .with_process_host(Box::new(NativeProcessHost))
         .with_pty_host(Box::new(NativePtyHost));
 
-    // The default shell env points at the in-memory VFS layout (/home/5cotts).
-    // In native mode we want to land on the host's actual cwd so spawned
-    // children inherit a directory that really exists. HOME / PWD are derived
-    // from the host environment for the same reason.
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_str = cwd.to_string_lossy().into_owned();
         shell.ctx.env.cwd = cwd_str.clone();
@@ -27,15 +24,6 @@ fn main() {
         shell.ctx.env.set("PATH", path);
     }
 
-    // Wire up Ctrl-C. `signal_hook::flag::register` installs an
-    // async-signal-safe handler that flips the shared atomic flag instead
-    // of the default SIGINT behavior (terminate). The pipeline executor
-    // polls this flag while draining child output and forwards
-    // `Signal::Interrupt` to the foreground child. The same SIGINT also
-    // reaches the child directly via the terminal foreground process group,
-    // so for well-behaved children (e.g. `sleep`) the kernel-delivered
-    // signal usually wins; our explicit `child.signal()` is the backstop
-    // for anything that ignores its terminal SIGINT.
     let cancel = shell.cancel_flag();
     signal_hook::flag::register(signal_hook::consts::SIGINT, cancel.clone())
         .expect("install SIGINT handler");
@@ -47,33 +35,50 @@ fn main() {
     print!("{}", shell.prompt());
     stdout.lock().flush().unwrap();
 
-    for line in stdin.lock().lines() {
-        let line = line.expect("failed to read line");
-        // Reset the cancel flag at the start of each command so a Ctrl-C
-        // that arrived during the previous prompt-read doesn't immediately
-        // cancel the next command.
+    // Read one line at a time, releasing the stdin lock before processing so
+    // the stdin→master thread inside drive_pty_job can acquire it.
+    loop {
+        let line = {
+            let mut lock = stdin.lock();
+            let mut buf = String::new();
+            match lock.read_line(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            buf.trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string()
+        };
         cancel.store(false, Ordering::Relaxed);
 
-        // PTY path for interactive foreground commands when our stdin is
-        // a real TTY. The routing rule (single-command pipeline, no
-        // redirects, not a builtin, resolves on PATH) lives in
-        // `Shell::pty_eligible` so it can stay in sync with the parser
-        // and the builtin set.
+        // Print Done notifications for background jobs that finished.
+        drain_done_notifications(&shell);
+
+        // Handle pending fg set by the `fg` builtin (Phase C).
+        if let Some(id) = shell.ctx.pending_fg.take() {
+            let exit = resume_fg(&mut shell, id);
+            shell.set_last_exit_code(exit);
+            if shell.exit_requested {
+                std::process::exit(shell.last_exit_code());
+            }
+            print!("{}", shell.prompt());
+            stdout.lock().flush().unwrap();
+            continue;
+        }
+
+        // Handle pending bg set by the `bg` builtin (Phase C).
+        if let Some(id) = shell.ctx.pending_bg.take() {
+            bg_job(&shell, id);
+        }
+
         if stdin_is_tty && shell.pty_eligible(&line) {
             let exit = run_in_pty(&mut shell, &line);
             shell.set_last_exit_code(exit);
         } else {
-            // Stream stdout/stderr directly to the terminal as the command
-            // produces them — long-running externals (e.g. `cargo build`)
-            // show progress live instead of dumping everything at the end.
             let mut out = StdoutSink;
             let mut err = StderrSink;
             shell.feed_streaming(&line, &mut out, &mut err);
             if cancel.swap(false, Ordering::Relaxed) {
-                // Mimic bash/zsh: print the visible Ctrl-C marker so the
-                // user can see why the command stopped. The line buffer is
-                // already empty (we just consumed `line`) so there's
-                // nothing extra to clear.
                 println!("^C");
             }
         }
@@ -85,10 +90,227 @@ fn main() {
     }
 }
 
-/// RAII guard around `crossterm::terminal::enable_raw_mode`. Drop restores
-/// cooked mode on every exit path — normal return, panic, early `?`. The
-/// CLI MUST go through this guard; manual `enable` / `disable` pairs are
-/// too easy to leak on a panic.
+/// Print Done/Exit notifications for background jobs that finished.
+fn drain_done_notifications(shell: &Shell) {
+    use wat_core::jobs::JobState;
+    let jobs_arc = shell.jobs();
+    let mut table = jobs_arc.lock().expect("job table");
+    let done_ids: Vec<u32> = table
+        .iter()
+        .filter(|j| matches!(j.state, JobState::Done(_)))
+        .map(|j| j.id)
+        .collect();
+    for id in done_ids {
+        if let Some(job) = table.remove(id) {
+            match job.state {
+                JobState::Done(0) => eprintln!("[{}]+ Done\t\t{}", job.id, job.cmd),
+                JobState::Done(code) => eprintln!("[{}]+ Exit {}\t\t{}", job.id, code, job.cmd),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Send SIGCONT to a stopped job without re-entering the drive loop.
+fn bg_job(shell: &Shell, id: u32) {
+    use wat_core::jobs::JobState;
+    let jobs_arc = shell.jobs();
+    let mut table = jobs_arc.lock().expect("job table");
+    if let Some(job) = table.get_mut(id) {
+        unsafe {
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            kill(-(job.pgid), 18); // SIGCONT
+        }
+        eprintln!("[{}] continued\t\t{}", job.id, job.cmd);
+        job.state = JobState::Running;
+    } else {
+        eprintln!("wat: bg: %{}: no such job", id);
+    }
+}
+
+/// Resume a stopped job in the foreground.
+fn resume_fg(shell: &mut Shell, id: u32) -> i32 {
+    let job = {
+        let jobs_arc = shell.jobs();
+        let mut table = jobs_arc.lock().expect("job table");
+        match table.remove(id) {
+            Some(j) => j,
+            None => {
+                eprintln!("wat: fg: %{}: no such job", id);
+                return 1;
+            }
+        }
+    };
+
+    let pgid = job.pgid;
+    let cmd = job.cmd.clone();
+
+    unsafe {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        kill(-pgid, 18); // SIGCONT
+    }
+    eprintln!("[{}] continued\t\t{}", id, cmd);
+
+    let mut pty = match job.pty {
+        Some(p) => p,
+        None => {
+            eprintln!("wat: fg: job %{} has no pty handles", id);
+            return 1;
+        }
+    };
+
+    let reader = match pty.child.clone_reader() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wat: fg: {}", e);
+            return 1;
+        }
+    };
+
+    let writer = match pty.writer.take() {
+        Some(w) => w,
+        None => match pty.child.master_writer() {
+            Some(w) => w,
+            None => {
+                eprintln!("wat: fg: no writer available for job %{}", id);
+                return 1;
+            }
+        },
+    };
+
+    let child_arc = Arc::new(Mutex::new(pty.child));
+    let cancel_pipe = CancelPipe::new();
+    let (exit, stopped, child_arc) = drive_pty_job(reader, writer, child_arc, &cmd, &cancel_pipe);
+    cancel_pipe.cancel(); // stop stdin→master thread
+
+    if stopped {
+        register_stopped_job(shell, child_arc, pgid, cmd);
+    }
+    exit
+}
+
+/// Register a stopped child in the job table and print the notification.
+fn register_stopped_job(
+    shell: &mut Shell,
+    child_arc: Arc<Mutex<Box<dyn PtyChild>>>,
+    fallback_pgid: i32,
+    cmd: String,
+) {
+    use wat_core::jobs::{JobPty, JobState};
+
+    let pid = child_arc
+        .lock()
+        .expect("child")
+        .pid()
+        .unwrap_or(fallback_pgid);
+
+    match Arc::try_unwrap(child_arc) {
+        Ok(mutex) => {
+            let child_box = mutex.into_inner().expect("mutex");
+            let pty = JobPty {
+                child: child_box,
+                reader: None,
+                writer: None,
+            };
+            let jobs_arc = shell.jobs();
+            let mut table = jobs_arc.lock().expect("job table");
+            let jid = table.add(cmd.clone(), pid, pty);
+            table.get_mut(jid).unwrap().state = JobState::Stopped;
+            eprintln!("\n[{}]+ Stopped\t\t{}", jid, cmd);
+        }
+        Err(arc) => {
+            // Arc still has references (shouldn't happen if SIGWINCH joined).
+            drop(arc);
+            eprintln!("\n[1]+ Stopped\t\t{}", cmd);
+        }
+    }
+}
+
+/// Self-pipe cancellation token for the stdin→master thread. The thread polls
+/// on fd 0 (stdin) and the read end of the pipe; writing to the write end
+/// wakes the thread so it can exit cleanly.
+struct CancelPipe {
+    #[cfg(unix)]
+    read_fd: i32,
+    #[cfg(unix)]
+    write_fd: i32,
+}
+
+impl CancelPipe {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            let mut fds = [0i32; 2];
+            let rc = unsafe { libc_pipe(fds.as_mut_ptr()) };
+            if rc != 0 {
+                panic!("CancelPipe::new: pipe() failed");
+            }
+            CancelPipe {
+                read_fd: fds[0],
+                write_fd: fds[1],
+            }
+        }
+        #[cfg(not(unix))]
+        CancelPipe {}
+    }
+
+    /// Signal the thread to stop.
+    fn cancel(&self) {
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc_write(self.write_fd, [0u8].as_ptr() as *const _, 1) };
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_fd(&self) -> i32 {
+        self.read_fd
+    }
+}
+
+impl Drop for CancelPipe {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            unsafe {
+                libc_close(self.read_fd);
+                libc_close(self.write_fd);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "pipe"]
+    fn libc_pipe(fds: *mut i32) -> i32;
+    #[link_name = "write"]
+    fn libc_write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    #[link_name = "close"]
+    fn libc_close(fd: i32) -> i32;
+    #[link_name = "read"]
+    fn libc_read_raw(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
+    #[link_name = "poll"]
+    fn libc_poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
+}
+
+/// Minimal poll(2) wrapper struct.
+#[cfg(unix)]
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[cfg(unix)]
+const POLLIN: i16 = 1;
+
+/// RAII guard around `crossterm::terminal::enable_raw_mode`.
 struct RawModeGuard;
 impl RawModeGuard {
     fn enter() -> io::Result<Self> {
@@ -102,32 +324,13 @@ impl Drop for RawModeGuard {
     }
 }
 
-/// Message type for the master-reader thread → main-thread channel.
 enum PtyMsg {
     Out(Vec<u8>),
     Done,
 }
 
-/// Drive a PTY-spawned child. Allocates a PTY at the current terminal size,
-/// enters raw mode, then runs a SIGCHLD-aware drive loop: a reader thread
-/// streams master output over a channel while the main thread polls
-/// `child.try_wait()` on each 100 ms timeout. This lets the main thread
-/// detect a stopped child (Ctrl-Z) without waiting for a master EOF that
-/// would never come from a suspended process.
-///
-/// Returns the child's exit code (or 127 on spawn failure). When the child
-/// is stopped rather than exited the return value is 128 + signum; Phase B
-/// will wire the stopped child into the job table instead.
-///
-/// SIGWINCH (terminal resize) is forwarded via a background thread. The
-/// stdin → master thread is intentionally detached — joining it would block
-/// the REPL until the user pressed another key.
+/// Spawn a PTY child and drive the SIGCHLD-aware read loop.
 fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
-    use std::sync::mpsc;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    use wat_core::process::ChildState;
-
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let dims = PtyDims { rows, cols };
     let mut child = match shell.spawn_pty(input, dims) {
@@ -139,19 +342,42 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
     };
     let reader = child.master_reader().expect("master reader");
     let writer = child.master_writer().expect("master writer");
-    // Arc<Mutex<>> shared between the SIGWINCH thread (needs resize()) and
-    // this thread (needs try_wait() / wait()).
-    let child = Arc::new(Mutex::new(child));
+    let child_arc = Arc::new(Mutex::new(child));
+    let cancel_pipe = CancelPipe::new();
+
+    let (exit, stopped, child_arc) = drive_pty_job(reader, writer, child_arc, input, &cancel_pipe);
+    // Signal the stdin→master thread to stop so it doesn't race with the REPL
+    // for stdin bytes on the next command.
+    cancel_pipe.cancel();
+
+    if stopped {
+        let pid = child_arc.lock().expect("child").pid().unwrap_or(0);
+        register_stopped_job(shell, child_arc, pid, input.trim().to_string());
+    }
+
+    exit
+}
+
+/// Inner drive loop. Returns `(exit_code, was_stopped, child_arc)`.
+fn drive_pty_job(
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Arc<Mutex<Box<dyn PtyChild>>>,
+    _cmd: &str,
+    cancel: &CancelPipe,
+) -> (i32, bool, Arc<Mutex<Box<dyn PtyChild>>>) {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use wat_core::process::ChildState;
 
     let _guard = match RawModeGuard::enter() {
         Ok(g) => g,
         Err(e) => {
             eprintln!("wat: enter raw mode: {}", e);
-            return 1;
+            return (1, false, child);
         }
     };
 
-    // SIGWINCH forwarding — same as Tier 2.
     #[cfg(unix)]
     let (winch_handle, winch_thread) = {
         use signal_hook::iterator::Signals;
@@ -175,28 +401,68 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
     let (winch_handle, winch_thread): (Option<()>, Option<std::thread::JoinHandle<()>>) =
         (None, None);
 
-    // stdin → master, detached. The writer is consumed here; Phase B will
-    // store it in the job table instead of dropping it on stop.
+    // stdin → master via raw fd poll, with cancellation. Bypasses io::stdin()
+    // lock so the REPL can re-acquire stdin after the drive loop exits.
+    #[cfg(unix)]
+    let cancel_read_fd = cancel.read_fd();
     std::thread::spawn(move || {
-        let stdin = io::stdin();
-        let mut stdin = stdin.lock();
         let mut writer = writer;
         let mut buf = [0u8; 1024];
         loop {
-            match stdin.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if writer.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                    let _ = writer.flush();
+            #[cfg(unix)]
+            {
+                // poll(stdin_fd=0, cancel_fd) with 200ms timeout.
+                let mut pfds = [
+                    PollFd {
+                        fd: 0,
+                        events: POLLIN,
+                        revents: 0,
+                    },
+                    PollFd {
+                        fd: cancel_read_fd,
+                        events: POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let rc = unsafe { libc_poll(pfds.as_mut_ptr(), 2, 200) };
+                if rc < 0 {
+                    break; // poll error
                 }
-                Err(_) => break,
+                if pfds[1].revents & POLLIN != 0 {
+                    break; // cancelled
+                }
+                if pfds[0].revents & POLLIN == 0 {
+                    continue; // timeout, no data
+                }
+                // Data on stdin.
+                let n = unsafe { libc_read_raw(0, buf.as_mut_ptr() as *mut _, buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                if writer.write_all(&buf[..n as usize]).is_err() {
+                    break;
+                }
+                let _ = writer.flush();
+            }
+            #[cfg(not(unix))]
+            {
+                let stdin = io::stdin();
+                let mut stdin = stdin.lock();
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if writer.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                        let _ = writer.flush();
+                    }
+                    Err(_) => break,
+                }
             }
         }
     });
 
-    // master → channel, in a background thread.
+    // master → channel.
     let (tx, rx) = mpsc::channel::<PtyMsg>();
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -220,7 +486,6 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         }
     });
 
-    // Drive loop: drain channel, poll child state on each timeout.
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     let mut stopped = false;
@@ -233,13 +498,11 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
                 let _ = stdout.flush();
             }
             Ok(PtyMsg::Done) => {
-                // Master EOF — child closed its slave FDs (exited).
                 let code = child.lock().expect("child mutex").wait().unwrap_or(1);
                 exit_code = code;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Poll child state without blocking.
                 let state = child
                     .lock()
                     .expect("child mutex")
@@ -266,7 +529,8 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         }
     }
 
-    // Tear down SIGWINCH handler.
+    drop(stdout);
+
     #[cfg(unix)]
     {
         if let Some(h) = winch_handle {
@@ -281,8 +545,5 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
         let _ = (winch_handle, winch_thread);
     }
 
-    // Phase B will use `stopped` to register the job instead of discarding.
-    let _ = stopped;
-
-    exit_code
+    (exit_code, stopped, child)
 }
