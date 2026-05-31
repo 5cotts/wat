@@ -1,12 +1,17 @@
 use crate::builtins::resolve::resolve_path;
+use crate::lexer::{strip_quote_marks, DQUOTE_MARK, LITERAL_MARK, QUOTED_SUBST_MARK};
 use crate::vfs::Vfs;
 
 /// Expand a glob pattern against the VFS. Returns a sorted list of matching paths.
-/// If the pattern has no glob metacharacters, or no matches, returns `[pattern]`.
+/// If the pattern has no (unquoted) glob metacharacters, or no matches, returns
+/// the marker-stripped pattern. Metacharacters inside quote-protected spans
+/// (single/double quotes) are treated literally: `'*'`/`"*"` do not glob.
 pub fn glob_expand(pattern: &str, vfs: &dyn Vfs, cwd: &str) -> Vec<String> {
-    if !has_glob(pattern) {
-        return vec![pattern.to_string()];
+    let clean = strip_quote_marks(pattern);
+    if !has_unprotected_glob(pattern) {
+        return vec![clean];
     }
+    let pattern = clean.as_str();
 
     // Split on the first glob-containing segment, resolve the prefix directory.
     let (dir, file_pat) = split_glob_path(pattern, cwd);
@@ -35,8 +40,21 @@ pub fn glob_expand(pattern: &str, vfs: &dyn Vfs, cwd: &str) -> Vec<String> {
     }
 }
 
-fn has_glob(s: &str) -> bool {
-    s.chars().any(|c| matches!(c, '*' | '?' | '['))
+/// True if `s` has a glob metacharacter outside any quote-protected span.
+/// Quote markers (single/double) toggle a "protected" region in which `*?[`
+/// are literal. (A pattern mixing protected and unprotected metacharacters is
+/// rare; the protected ones are then treated as metacharacters too.)
+fn has_unprotected_glob(s: &str) -> bool {
+    let mut protected = false;
+    for c in s.chars() {
+        match c {
+            LITERAL_MARK | DQUOTE_MARK => protected = !protected,
+            QUOTED_SUBST_MARK => {}
+            '*' | '?' | '[' if !protected => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn split_glob_path(pattern: &str, cwd: &str) -> (String, String) {

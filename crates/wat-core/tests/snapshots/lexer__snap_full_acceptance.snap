@@ -7,7 +7,7 @@ expression: "toks(r#\"echo \"hello world\" | grep h > out.txt && cat out.txt\"#)
         "echo",
     ),
     Word(
-        "hello world",
+        "\u{4}hello world\u{4}",
     ),
     Pipe,
     Word(

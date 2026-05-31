@@ -7,7 +7,7 @@ expression: "toks(r#\"echo \"a\\\"b\"\"#)"
         "echo",
     ),
     Word(
-        "a\"b",
+        "\u{4}a\"b\u{4}",
     ),
     Eof,
 ]

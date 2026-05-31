@@ -7,7 +7,7 @@ expression: "toks(r#\"echo '$HOME'\"#)"
         "echo",
     ),
     Word(
-        "$HOME",
+        "\u{2}$HOME\u{2}",
     ),
     Eof,
 ]

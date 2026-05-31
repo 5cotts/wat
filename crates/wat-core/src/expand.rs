@@ -1,7 +1,7 @@
 use crate::context::Context;
 use crate::env::Env;
 use crate::io::OutputSink;
-use crate::lexer::QUOTED_SUBST_MARK;
+use crate::lexer::{DQUOTE_MARK, LITERAL_MARK, QUOTED_SUBST_MARK};
 
 /// Maximum command-substitution nesting depth before we refuse to recurse.
 const MAX_SUBST_DEPTH: u32 = 32;
@@ -22,16 +22,25 @@ pub fn expand_word(word: &str, env: &Env) -> String {
         i = 1;
     }
 
+    let mut literal = false;
     while i < chars.len() {
-        if chars[i] == QUOTED_SUBST_MARK {
-            // Internal marker is meaningful only to expand_word_ctx; drop it.
+        let c = chars[i];
+        if c == LITERAL_MARK {
+            // Single-quoted span: copy verbatim until the closing mark.
+            literal = !literal;
             i += 1;
-        } else if chars[i] == '$' {
+        } else if c == DQUOTE_MARK || c == QUOTED_SUBST_MARK {
+            // Quote/no-split markers are meaningless to the pure expander.
+            i += 1;
+        } else if literal {
+            out.push(c);
+            i += 1;
+        } else if c == '$' {
             let (text, next) = expand_dollar(&chars, i, env);
             out.push_str(&text);
             i = next;
         } else {
-            out.push(chars[i]);
+            out.push(c);
             i += 1;
         }
     }
@@ -471,10 +480,13 @@ pub fn expand_word_ctx(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) 
 /// glob the result), matching POSIX assignment semantics. Returns the single
 /// joined string.
 pub fn expand_value(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) -> String {
-    expand_word_ctx_inner(word, ctx, err, false)
+    let raw = expand_word_ctx_inner(word, ctx, err, false)
         .into_iter()
         .next()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Value contexts (assignment RHS, case subject/pattern) are not globbed, so
+    // strip the protection markers here.
+    crate::lexer::strip_quote_marks(&raw)
 }
 
 fn expand_word_ctx_inner(
@@ -489,6 +501,7 @@ fn expand_word_ctx_inner(
     // be empty, e.g. from a quoted empty substitution).
     let mut current: Option<String> = None;
     let mut next_quoted = false;
+    let mut literal = false;
     let mut i = 0;
 
     if !chars.is_empty() && chars[0] == '~' && (chars.len() == 1 || chars[1] == '/') {
@@ -498,6 +511,26 @@ fn expand_word_ctx_inner(
 
     while i < chars.len() {
         let c = chars[i];
+        // Single-quoted run: copy verbatim (no expansion). The `DQUOTE_MARK`
+        // emitted into the field protects the content from later globbing.
+        if c == LITERAL_MARK {
+            literal = !literal;
+            push_literal(&mut current, &DQUOTE_MARK.to_string());
+            i += 1;
+            continue;
+        }
+        if literal {
+            push_literal(&mut current, &c.to_string());
+            i += 1;
+            continue;
+        }
+        // Double-quoted boundary: pass the glob-protect toggle through and keep
+        // expanding (so `$VAR` inside double quotes still resolves).
+        if c == DQUOTE_MARK {
+            push_literal(&mut current, &DQUOTE_MARK.to_string());
+            i += 1;
+            continue;
+        }
         if c == QUOTED_SUBST_MARK {
             // The immediately following substitution was double-quoted.
             next_quoted = true;

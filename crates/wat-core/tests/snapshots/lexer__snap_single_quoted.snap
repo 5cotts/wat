@@ -7,7 +7,7 @@ expression: "toks(\"echo 'hello world'\")"
         "echo",
     ),
     Word(
-        "hello world",
+        "\u{2}hello world\u{2}",
     ),
     Eof,
 ]
