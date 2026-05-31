@@ -68,6 +68,115 @@ pub fn bg_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     }
 }
 
+/// `kill [-SIG] %N | <pid>` — send a signal (default TERM) to a job's process
+/// group or to a raw pid. Job death is observed asynchronously by the REPL's
+/// SIGCHLD handler, which prints the Done/Exit notification at the next prompt.
+pub fn kill_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    if args.is_empty() {
+        io.write_err("wat: kill: usage: kill [-SIG] %job | pid\n");
+        return 2;
+    }
+
+    // Optional leading signal spec: -9, -KILL, -SIGKILL, -TERM, ...
+    let (signum, rest) = if let Some(first) = args.first().filter(|a| a.starts_with('-')) {
+        match parse_signal(&first[1..]) {
+            Some(n) => (n, &args[1..]),
+            None => {
+                io.write_err(&format!("wat: kill: {}: invalid signal\n", first));
+                return 1;
+            }
+        }
+    } else {
+        (15, args) // SIGTERM
+    };
+
+    let target = match rest.first() {
+        Some(t) => t,
+        None => {
+            io.write_err("wat: kill: usage: kill [-SIG] %job | pid\n");
+            return 2;
+        }
+    };
+
+    if let Some(job_spec) = target.strip_prefix('%') {
+        // Job target → signal the whole process group.
+        let id = match job_spec.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => {
+                io.write_err(&format!("wat: kill: {}: invalid job id\n", target));
+                return 1;
+            }
+        };
+        let table = ctx.jobs.lock().expect("job table");
+        let pgid = match table.get(id) {
+            Some(job) => job.pgid,
+            None => {
+                io.write_err(&format!("wat: kill: %{}: no such job\n", id));
+                return 1;
+            }
+        };
+        send_signal(-pgid, signum, io, &format!("%{}", id))
+    } else {
+        // Raw pid target.
+        match target.parse::<i32>() {
+            Ok(pid) => send_signal(pid, signum, io, target),
+            Err(_) => {
+                io.write_err(&format!(
+                    "wat: kill: {}: arguments must be job ids or pids\n",
+                    target
+                ));
+                1
+            }
+        }
+    }
+}
+
+/// Map a signal spec (`9`, `KILL`, `SIGKILL`) to its number.
+fn parse_signal(spec: &str) -> Option<i32> {
+    if let Ok(n) = spec.parse::<i32>() {
+        return Some(n);
+    }
+    let name = spec
+        .strip_prefix("SIG")
+        .unwrap_or(spec)
+        .to_ascii_uppercase();
+    Some(match name.as_str() {
+        "HUP" => 1,
+        "INT" => 2,
+        "QUIT" => 3,
+        "KILL" => 9,
+        "TERM" => 15,
+        "STOP" => 19,
+        "CONT" => 18,
+        "USR1" => 10,
+        "USR2" => 12,
+        _ => return None,
+    })
+}
+
+#[cfg(unix)]
+fn send_signal(target: i32, signum: i32, io: &mut ShellIo, label: &str) -> i32 {
+    extern "C" {
+        #[link_name = "kill"]
+        fn libc_kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: kill(2) is a plain syscall; we tolerate failure (ESRCH, EPERM).
+    let rc = unsafe { libc_kill(target, signum) };
+    if rc == 0 {
+        0
+    } else {
+        let err = std::io::Error::last_os_error();
+        io.write_err(&format!("wat: kill: {}: {}\n", label, err));
+        1
+    }
+}
+
+#[cfg(not(unix))]
+fn send_signal(_target: i32, _signum: i32, io: &mut ShellIo, _label: &str) -> i32 {
+    io.write_err("wat: kill: not supported on this platform\n");
+    1
+}
+
 /// Parse an optional `%N` argument; fall back to the most-recent job.
 fn resolve_job_id(args: &[String], ctx: &Context, io: &mut ShellIo, builtin: &str) -> Option<u32> {
     let table = ctx.jobs.lock().expect("job table");

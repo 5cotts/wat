@@ -53,6 +53,8 @@ pub fn run_builtin<'a>(
         "fg" => Some(jobs_builtins::fg_builtin(args, ctx, io)),
         #[cfg(feature = "native-pty")]
         "bg" => Some(jobs_builtins::bg_builtin(args, ctx, io)),
+        #[cfg(feature = "native-pty")]
+        "kill" => Some(jobs_builtins::kill_builtin(args, ctx, io)),
         // Easter eggs
         "sudo" => Some(easter::sudo(io)),
         "vim" | "vi" | "nano" | "emacs" => Some(easter::editor_trap(name, io)),
@@ -68,7 +70,7 @@ pub fn run_builtin<'a>(
 /// process-spawning external path.
 pub fn is_builtin(name: &str) -> bool {
     #[cfg(feature = "native-pty")]
-    if matches!(name, "jobs" | "fg" | "bg") {
+    if matches!(name, "jobs" | "fg" | "bg" | "kill") {
         return true;
     }
     matches!(

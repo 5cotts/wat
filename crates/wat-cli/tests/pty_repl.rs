@@ -430,8 +430,10 @@ fn ctrl_z_stops_pty_child_and_returns_to_prompt() {
         after
     );
 
-    // wat-cli should still be alive and responsive.
-    writer.write_all(b"exit\n").expect("exit");
+    // wat-cli should still be alive and responsive. There's a stopped job, so
+    // the first `exit` warns and is cancelled; a second consecutive `exit`
+    // quits.
+    writer.write_all(b"exit\nexit\n").expect("exit");
     let start = Instant::now();
     loop {
         if child.try_wait().expect("try_wait").is_some() {
@@ -495,7 +497,8 @@ fn jobs_lists_stopped_job() {
         jobs_out
     );
 
-    writer.write_all(b"exit\n").expect("exit");
+    // Stopped job present → first exit warns; second quits.
+    writer.write_all(b"exit\nexit\n").expect("exit");
     wait_for_wat_exit(child);
 }
 
@@ -588,7 +591,8 @@ fn fg_then_ctrl_z_restops_then_responsive() {
         out
     );
 
-    writer.write_all(b"exit\n").expect("exit");
+    // Job still stopped → first exit warns; second quits.
+    writer.write_all(b"exit\nexit\n").expect("exit");
     wait_for_wat_exit(child);
 }
 
@@ -790,5 +794,92 @@ fn e2e_full_job_control_session() {
 
     // 6. clean exit (a kill of the still-stopped sleep 30 job is acceptable).
     writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+// ── Tier 3 follow-up: kill %N + "you have stopped jobs" exit warning ──────
+
+#[test]
+fn kill_percent_terminates_background_job() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Background a long sleep, then kill it by job spec.
+    writer.write_all(b"sleep 30 &\n").expect("bg");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains("[1]"), "no job registration: {:?}", out);
+
+    writer.write_all(b"kill %1\n").expect("kill");
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // SIGTERM kills the sleep; the SIGCHLD handler marks it Done and the next
+    // prompt carries the notification (signal exit → 128+15 = 143).
+    std::thread::sleep(Duration::from_millis(200));
+    writer.write_all(b"echo poke\n").expect("poke");
+    let after = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after.contains("Exit") || after.contains("Done"),
+        "expected a termination notification after kill, got: {:?}",
+        after
+    );
+
+    // The job table is now empty.
+    writer.write_all(b"jobs\n").expect("jobs");
+    let jobs_out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        !jobs_out.contains("Running") && !jobs_out.contains("sleep"),
+        "killed job should be gone from jobs, got: {:?}",
+        jobs_out
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn exit_warns_about_stopped_jobs_then_quits() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    // Stop a job.
+    writer.write_all(b"sleep 30\n").expect("sleep");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"\x1a").expect("ctrl-z");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains("Stopped"), "no stop: {:?}", out);
+
+    // First exit warns and is cancelled — shell stays alive.
+    writer.write_all(b"exit\n").expect("exit 1");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("You have stopped jobs"),
+        "first exit should warn, got: {:?}",
+        out
+    );
+
+    // A non-exit command resets the warning and proves the shell is alive.
+    writer.write_all(b"echo alive\n").expect("echo");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("alive"),
+        "shell not alive after warn: {:?}",
+        out
+    );
+
+    // Because the warning reset, the next exit warns again rather than quitting.
+    writer.write_all(b"exit\n").expect("exit 2");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("You have stopped jobs"),
+        "exit after a command should warn again, got: {:?}",
+        out
+    );
+
+    // A second *consecutive* exit proceeds.
+    writer.write_all(b"exit\n").expect("exit 3");
     wait_for_wat_exit(child);
 }
