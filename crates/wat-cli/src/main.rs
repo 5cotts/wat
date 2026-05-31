@@ -286,6 +286,9 @@ fn resume_fg(shell: &mut Shell, id: u32) -> i32 {
         }
     };
 
+    // Fresh reader/writer cloned from the master fd. The original handles
+    // from the first foreground run were consumed by that run's I/O threads;
+    // `take_writer` is one-shot, so we dup the master fd via clone_writer.
     let reader = match pty.child.clone_reader() {
         Ok(r) => r,
         Err(e) => {
@@ -293,16 +296,12 @@ fn resume_fg(shell: &mut Shell, id: u32) -> i32 {
             return 1;
         }
     };
-
-    let writer = match pty.writer.take() {
-        Some(w) => w,
-        None => match pty.child.master_writer() {
-            Some(w) => w,
-            None => {
-                eprintln!("wat: fg: no writer available for job %{}", id);
-                return 1;
-            }
-        },
+    let writer = match pty.child.clone_writer() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("wat: fg: {}", e);
+            return 1;
+        }
     };
 
     let child_arc = Arc::new(Mutex::new(pty.child));
@@ -462,8 +461,8 @@ fn run_in_pty(shell: &mut Shell, input: &str) -> i32 {
             return 127;
         }
     };
-    let reader = child.master_reader().expect("master reader");
-    let writer = child.master_writer().expect("master writer");
+    let reader = child.clone_reader().expect("master reader");
+    let writer = child.clone_writer().expect("master writer");
     let child_arc = Arc::new(Mutex::new(child));
     let cancel_pipe = CancelPipe::new();
 
@@ -581,12 +580,62 @@ fn drive_pty_job(
         }
     });
 
-    // master → channel.
+    // master → channel, cancellable. On a stop the master never EOFs (the
+    // child is only suspended), so a plain blocking read would leak this
+    // thread — and worse, a leaked reader would steal output once the job is
+    // resumed via `fg`. We poll the master fd alongside the cancel pipe so the
+    // thread exits cleanly on stop and is joined before returning.
+    #[cfg(unix)]
+    let master_fd = child.lock().expect("child mutex").master_fd();
     let (tx, rx) = mpsc::channel::<PtyMsg>();
-    std::thread::spawn(move || {
+    let reader_thread = std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 4096];
         loop {
+            #[cfg(unix)]
+            if let Some(mfd) = master_fd {
+                let mut pfds = [
+                    PollFd {
+                        fd: mfd,
+                        events: POLLIN,
+                        revents: 0,
+                    },
+                    PollFd {
+                        fd: cancel_read_fd,
+                        events: POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let rc = unsafe { libc_poll(pfds.as_mut_ptr(), 2, 200) };
+                if rc < 0 {
+                    let _ = tx.send(PtyMsg::Done);
+                    break;
+                }
+                if pfds[1].revents & POLLIN != 0 {
+                    break; // cancelled (job stopped or session ended)
+                }
+                if pfds[0].revents == 0 {
+                    continue; // timeout, no data
+                }
+                // Readable or hangup — read (returns 0 on EOF/child exit).
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx.send(PtyMsg::Done);
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx.send(PtyMsg::Out(buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tx.send(PtyMsg::Done);
+                        break;
+                    }
+                }
+                continue;
+            }
+            // No master fd (non-unix) — fall back to a blocking read.
             match reader.read(&mut buf) {
                 Ok(0) => {
                     let _ = tx.send(PtyMsg::Done);
@@ -664,10 +713,12 @@ fn drive_pty_job(
         let _ = (winch_handle, winch_thread);
     }
 
-    // Signal the stdin→master thread to stop and wait for it to exit.
-    // This ensures no raw fd 0 reads race with the REPL's next stdin.lock().
+    // Signal the stdin→master and master→channel threads to stop and wait for
+    // them to exit. This ensures no raw fd 0 reads race with the REPL's next
+    // stdin.lock(), and no leaked reader steals output from a resumed job.
     cancel.cancel();
     let _ = stdin_thread.join();
+    let _ = reader_thread.join();
 
     (exit_code, stopped, child)
 }

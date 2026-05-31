@@ -518,15 +518,74 @@ fn fg_resumes_stopped_job_in_foreground() {
         after_stop
     );
 
-    // fg resumes sleep 0.5; it should finish within ~500ms and return prompt.
+    // fg resumes sleep 0.5; it should run to completion and return to prompt.
     writer.write_all(b"fg\n").expect("write fg");
     let after_fg = read_until(&mut reader, PROMPT_MARKER, deadline());
 
-    // Sleep should finish (not print Stopped again).
+    // Positive evidence fg actually re-drove the job: it must NOT error out
+    // ("no writer", "no such job") and must NOT re-stop on its own.
+    assert!(
+        !after_fg.contains("no writer") && !after_fg.contains("no such job"),
+        "fg errored instead of resuming: {:?}",
+        after_fg
+    );
     assert!(
         !after_fg.contains("Stopped"),
         "expected sleep to finish, not stop again, got: {:?}",
         after_fg
+    );
+
+    // Strongest check: the shell is responsive afterward. If fg had hung in
+    // the drive loop, this marker command would time out.
+    writer
+        .write_all(b"echo resumed_ok\n")
+        .expect("write marker");
+    let after_marker = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        after_marker.contains("resumed_ok"),
+        "shell not responsive after fg; got: {:?}",
+        after_marker
+    );
+
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+#[test]
+fn fg_then_ctrl_z_restops_then_responsive() {
+    // Regression for the clone_writer fix. A job must survive
+    // Ctrl-Z → fg → Ctrl-Z and leave the shell responsive. The original
+    // take_writer's EOF-on-drop corrupted the inner tty so the SECOND Ctrl-Z
+    // never reached the child and the drive loop hung forever.
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+
+    writer.write_all(b"sleep 30\n").expect("write sleep");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"\x1a").expect("ctrl-z 1");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains("Stopped"), "first stop failed: {:?}", out);
+
+    writer.write_all(b"fg\n").expect("write fg");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"\x1a").expect("ctrl-z 2");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("Stopped"),
+        "second Ctrl-Z after fg did not re-stop (drive loop hang?): {:?}",
+        out
+    );
+
+    writer
+        .write_all(b"echo still_alive\n")
+        .expect("write marker");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("still_alive"),
+        "shell hung after fg/ctrl-z cycle: {:?}",
+        out
     );
 
     writer.write_all(b"exit\n").expect("exit");
@@ -646,6 +705,78 @@ fn done_notification_uses_exit_status() {
         after
     );
 
+    writer.write_all(b"exit\n").expect("exit");
+    wait_for_wat_exit(child);
+}
+
+// ── Tier 3: full 'Done definition' e2e walkthrough in one session ─────────
+//
+// Mirrors the manual acceptance scenario from wat-tier3-plan.md's "Done
+// definition": sleep 30 → Ctrl-Z → jobs → fg → Ctrl-Z → bg → sleep 0.3 & →
+// Done. Runs against the built `wat` binary in a real PTY — the closest
+// automated equivalent to a human driving the shell. This is the test that
+// would have caught the fg/clone_writer regression that the per-feature
+// tests' weak assertions missed.
+
+#[test]
+fn e2e_full_job_control_session() {
+    let (_master, mut reader, mut writer, child) = spawn_wat_in_pty();
+    let deadline = || Instant::now() + READ_TIMEOUT;
+
+    // Initial prompt.
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains(PROMPT_MARKER), "no initial prompt: {:?}", out);
+
+    // 1. sleep 30 + Ctrl-Z → Stopped.
+    writer.write_all(b"sleep 30\n").expect("sleep");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"\x1a").expect("ctrl-z");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains("Stopped"), "step1 no Stopped: {:?}", out);
+
+    // 2. jobs lists it.
+    writer.write_all(b"jobs\n").expect("jobs");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("Stopped") && out.contains("sleep"),
+        "step2 jobs missing entry: {:?}",
+        out
+    );
+
+    // 3. fg resumes, then Ctrl-Z re-stops.
+    writer.write_all(b"fg\n").expect("fg");
+    std::thread::sleep(Duration::from_millis(300));
+    writer.write_all(b"\x1a").expect("ctrl-z 2");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("Stopped"),
+        "step3 fg+ctrlz no re-stop: {:?}",
+        out
+    );
+
+    // 4. bg resumes in background, returns to prompt promptly.
+    writer.write_all(b"bg\n").expect("bg");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(out.contains(PROMPT_MARKER), "step4 bg no prompt: {:?}", out);
+
+    // 5. sleep 0.3 & backgrounds; Done shows at a later prompt.
+    writer.write_all(b"sleep 0.3 &\n").expect("amp");
+    read_until(&mut reader, PROMPT_MARKER, deadline());
+    std::thread::sleep(Duration::from_millis(600));
+    writer.write_all(b"echo done_check\n").expect("poke");
+    let out = read_until(&mut reader, PROMPT_MARKER, deadline());
+    assert!(
+        out.contains("done_check"),
+        "step5 shell unresponsive: {:?}",
+        out
+    );
+    assert!(
+        out.contains("Done"),
+        "step5 no Done notification for finished bg job: {:?}",
+        out
+    );
+
+    // 6. clean exit (a kill of the still-stopped sleep 30 job is acceptable).
     writer.write_all(b"exit\n").expect("exit");
     wait_for_wat_exit(child);
 }
