@@ -168,35 +168,58 @@ fn extract_subst(chars: &[char], i: usize) -> Option<(SubstKind, String, usize)>
 /// Full expansion for the command path: `~`, `$VAR`/`${VAR}`, `$?`, command
 /// substitution `$(...)`/`` `...` ``, and (Phase D) arithmetic `$((...))`.
 /// May run sub-pipelines, so it needs `&mut Context`; substitution stderr is
-/// forwarded to `err`. Returns the expanded word(s).
+/// forwarded to `err`.
 ///
-/// Phase B: always returns exactly one word (no field splitting yet). The
-/// `QUOTED_SUBST_MARK` is recognized but both quoted and unquoted spans yield
-/// a single field; Phase C adds splitting for unquoted ones.
+/// Returns the expanded word(s) after field splitting. Output of an **unquoted**
+/// command substitution is split on IFS whitespace (space/tab/newline) into
+/// separate fields, with adjacent literals joining the first/last field. A
+/// **quoted** substitution (preceded by `QUOTED_SUBST_MARK`), literal text, and
+/// `$VAR` expansions are never split — they append to the current field. This
+/// mirrors POSIX field splitting, restricted to command substitution (this
+/// shell does not IFS-split `$VAR`). Globbing is applied by the caller.
 pub fn expand_word_ctx(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
-    let mut out = String::with_capacity(word.len());
+    let mut fields: Vec<String> = Vec::new();
+    // `None` = no field in progress; `Some(s)` = a field is being built (s may
+    // be empty, e.g. from a quoted empty substitution).
+    let mut current: Option<String> = None;
+    let mut next_quoted = false;
     let mut i = 0;
 
     if !chars.is_empty() && chars[0] == '~' && (chars.len() == 1 || chars[1] == '/') {
-        out.push_str(ctx.env.home());
+        push_literal(&mut current, ctx.env.home());
         i = 1;
     }
 
     while i < chars.len() {
         let c = chars[i];
         if c == QUOTED_SUBST_MARK {
-            // Marks that the following substitution was double-quoted. Phase B
-            // does not split either way, so just consume the marker.
+            // The immediately following substitution was double-quoted.
+            next_quoted = true;
             i += 1;
             continue;
         }
+        // `quoted` applies only to the token handled in this iteration.
+        let quoted = next_quoted;
+        next_quoted = false;
+
         if c == '`' || (c == '$' && i + 1 < chars.len() && chars[i + 1] == '(') {
             if let Some((kind, inner, next)) = extract_subst(&chars, i) {
                 match kind {
-                    SubstKind::Command => out.push_str(&run_command_subst(&inner, ctx, err)),
-                    // Phase D evaluates this; until then leave it literal.
-                    SubstKind::Arith => out.extend(chars[i..next].iter()),
+                    SubstKind::Command => {
+                        let output = run_command_subst(&inner, ctx, err);
+                        if quoted {
+                            push_literal(&mut current, &output);
+                        } else {
+                            push_split(&mut fields, &mut current, &output);
+                        }
+                    }
+                    // Phase D evaluates this; until then leave it literal (and
+                    // never split, like a quoted value).
+                    SubstKind::Arith => {
+                        let lit: String = chars[i..next].iter().collect();
+                        push_literal(&mut current, &lit);
+                    }
                 }
                 i = next;
                 continue;
@@ -205,15 +228,66 @@ pub fn expand_word_ctx(word: &str, ctx: &mut Context, err: &mut dyn OutputSink) 
         }
         if c == '$' {
             let (text, next) = expand_dollar(&chars, i, &ctx.env);
-            out.push_str(&text);
+            push_literal(&mut current, &text);
             i = next;
         } else {
-            out.push(c);
+            push_literal(&mut current, &c.to_string());
             i += 1;
         }
     }
 
-    vec![out]
+    if let Some(c) = current {
+        fields.push(c);
+    }
+    fields
+}
+
+/// Append non-splittable text to the field in progress, starting one if needed.
+fn push_literal(current: &mut Option<String>, text: &str) {
+    match current {
+        Some(s) => s.push_str(text),
+        None => *current = Some(text.to_string()),
+    }
+}
+
+/// Append the output of an unquoted command substitution, splitting on runs of
+/// IFS whitespace. Whitespace runs separate fields; text adjacent to a run on
+/// its left ends a field and text on its right starts one (so literals join the
+/// first/last field). Leading/trailing/repeated whitespace produces no empty
+/// fields.
+fn push_split(fields: &mut Vec<String>, current: &mut Option<String>, s: &str) {
+    let is_ifs = |c: char| c == ' ' || c == '\t' || c == '\n';
+    if s.is_empty() {
+        return;
+    }
+    let has_lead = s.starts_with(is_ifs);
+    let has_trail = s.ends_with(is_ifs);
+    let tokens: Vec<&str> = s.split(is_ifs).filter(|t| !t.is_empty()).collect();
+
+    if tokens.is_empty() {
+        // All whitespace: acts purely as a field separator.
+        if let Some(c) = current.take() {
+            fields.push(c);
+        }
+        return;
+    }
+    if has_lead {
+        if let Some(c) = current.take() {
+            fields.push(c);
+        }
+    }
+    push_literal(current, tokens[0]);
+    for t in &tokens[1..] {
+        if let Some(c) = current.take() {
+            fields.push(c);
+        }
+        push_literal(current, t);
+    }
+    if has_trail {
+        if let Some(c) = current.take() {
+            fields.push(c);
+        }
+    }
 }
 
 /// Execute `inner` as a command list, returning its stdout with all trailing
