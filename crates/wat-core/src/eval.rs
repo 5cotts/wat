@@ -1,4 +1,4 @@
-use crate::ast::{Command, List, Pipeline, Redirect, Separator, SimpleCommand};
+use crate::ast::{Command, CompoundCommand, List, Pipeline, Redirect, Separator, SimpleCommand};
 use crate::builtins::resolve::resolve_path;
 use crate::builtins::run_builtin;
 use crate::context::Context;
@@ -113,13 +113,40 @@ fn eval_pipeline(
     if pipeline.0.len() == 1 {
         return match &pipeline.0[0] {
             Command::Simple(sc) => run_command(sc, ctx, initial_stdin, final_out, final_err),
-            // Compound commands are produced starting in Phase B.
-            Command::Compound(_) => {
-                unreachable!("compound commands are not yet produced by the parser")
-            }
+            Command::Compound(cc) => eval_compound(cc, ctx, final_out, final_err),
         };
     }
     eval_pipeline_chained(pipeline, ctx, initial_stdin, final_out, final_err)
+}
+
+/// Evaluate a compound (control-flow) command. Runs in the current shell — no
+/// subshell — so assignments and `cd` inside it persist.
+fn eval_compound(
+    cc: &CompoundCommand,
+    ctx: &mut Context,
+    out: &mut dyn OutputSink,
+    err: &mut dyn OutputSink,
+) -> i32 {
+    match cc {
+        CompoundCommand::If {
+            branches,
+            else_body,
+        } => {
+            for (cond, body) in branches {
+                let cond_code = eval_streaming(cond, ctx, out, err);
+                ctx.env.last_exit_code = cond_code;
+                if cond_code == 0 {
+                    return eval_streaming(body, ctx, out, err);
+                }
+            }
+            match else_body {
+                Some(body) => eval_streaming(body, ctx, out, err),
+                None => 0,
+            }
+        }
+        // Loops and case land in Phases C/D.
+        _ => unreachable!("only `if` is produced by the parser in Phase B"),
+    }
 }
 
 /// Multi-segment pipeline executor. For each adjacent pair of external
@@ -176,12 +203,25 @@ fn eval_pipeline_chained(
     for (idx, command) in pipeline.0.iter().enumerate() {
         let is_last = idx + 1 == n;
 
-        // Compound commands inside a pipeline land in a later phase; today the
-        // parser only produces simple commands here.
+        // A compound command as a pipeline segment (`if ...; fi | cmd`) runs
+        // synchronously and buffers its stdout for the next segment, like a
+        // builtin. It does not consume the piped stdin (rare; documented).
         let cmd = match command {
             Command::Simple(sc) => sc,
-            Command::Compound(_) => {
-                unreachable!("compound commands are not yet produced by the parser")
+            Command::Compound(cc) => {
+                let mut buffered_out = VecSink::new();
+                let code = {
+                    let stdout_target: &mut dyn OutputSink = if is_last {
+                        final_out
+                    } else {
+                        &mut buffered_out
+                    };
+                    eval_compound(cc, ctx, stdout_target, final_err)
+                };
+                last_code = code;
+                ctx.env.last_exit_code = code;
+                current = PipelineStdin::Bytes(buffered_out.into_inner());
+                continue;
             }
         };
 
