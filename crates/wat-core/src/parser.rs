@@ -175,9 +175,12 @@ impl Parser {
         Ok(Pipeline(commands))
     }
 
-    /// Parse one command: a compound command if a control-flow keyword is in
-    /// command position, otherwise a simple command.
+    /// Parse one command: a function definition, a compound command (if a
+    /// control-flow keyword / `{` is in command position), or a simple command.
     fn parse_command(&mut self) -> Result<Command, ParseError> {
+        if let Some(def) = self.try_parse_function()? {
+            return Ok(def);
+        }
         if let Token::Word(w) = self.peek() {
             match w.as_str() {
                 "if" => return Ok(Command::Compound(self.parse_if()?)),
@@ -185,10 +188,11 @@ impl Parser {
                 "until" => return Ok(Command::Compound(self.parse_while(true)?)),
                 "for" => return Ok(Command::Compound(self.parse_for()?)),
                 "case" => return Ok(Command::Compound(self.parse_case()?)),
+                "{" => return Ok(Command::Compound(self.parse_brace_group()?)),
                 // A terminator keyword in command position with no open
                 // construct is a syntax error (we'd otherwise treat it as a
                 // command name and fail with "command not found").
-                "then" | "elif" | "else" | "fi" | "do" | "done" | "esac" => {
+                "then" | "elif" | "else" | "fi" | "do" | "done" | "esac" | "}" => {
                     return Err(ParseError {
                         message: format!("unexpected '{}'", w),
                         offset: self.offset(),
@@ -199,6 +203,99 @@ impl Parser {
             }
         }
         Ok(Command::Simple(self.parse_simple_command()?))
+    }
+
+    /// `{ list; }` — a brace group (runs in the current shell).
+    fn parse_brace_group(&mut self) -> Result<CompoundCommand, ParseError> {
+        self.advance(); // consume `{`
+        let body = self.parse_list_until(&["}"])?;
+        self.expect_keyword("}")?;
+        Ok(CompoundCommand::BraceGroup(body))
+    }
+
+    /// Detect and parse a function definition in command position:
+    /// `name() body`, `name () body`, `function name body`, `function name() body`.
+    /// Returns `None` (consuming nothing) if the next tokens aren't a definition.
+    fn try_parse_function(&mut self) -> Result<Option<Command>, ParseError> {
+        // `function NAME [()] body`
+        if self.at_keyword("function") {
+            self.advance();
+            let name = match self.peek().clone() {
+                Token::Word(w) => {
+                    self.advance();
+                    // Allow a trailing "()" or "(" ")" after the name.
+                    w.strip_suffix("()").map(|s| s.to_string()).unwrap_or(w)
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected function name after `function`".to_string(),
+                        offset: self.offset(),
+                        incomplete: *self.peek() == Token::Eof,
+                    })
+                }
+            };
+            if self.at_keyword("()") {
+                self.advance();
+            }
+            let body = self.parse_function_body()?;
+            return Ok(Some(Command::FunctionDef {
+                name,
+                body: Box::new(body),
+            }));
+        }
+
+        // `name() body` — a single word ending in "()".
+        if let Token::Word(w) = self.peek() {
+            if let Some(name) = w.strip_suffix("()") {
+                if is_identifier(name) {
+                    let name = name.to_string();
+                    self.advance();
+                    let body = self.parse_function_body()?;
+                    return Ok(Some(Command::FunctionDef {
+                        name,
+                        body: Box::new(body),
+                    }));
+                }
+            }
+        }
+
+        // `name ()` — identifier word followed by a "()" word.
+        if let Token::Word(name) = self.peek() {
+            if is_identifier(name) {
+                if let Some(Spanned {
+                    token: Token::Word(w2),
+                    ..
+                }) = self.tokens.get(self.pos + 1)
+                {
+                    if w2 == "()" {
+                        let name = name.clone();
+                        self.advance(); // name
+                        self.advance(); // ()
+                        let body = self.parse_function_body()?;
+                        return Ok(Some(Command::FunctionDef {
+                            name,
+                            body: Box::new(body),
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// The body of a function definition: a single (usually compound) command,
+    /// after optional newlines.
+    fn parse_function_body(&mut self) -> Result<Command, ParseError> {
+        self.skip_newlines();
+        if *self.peek() == Token::Eof {
+            return Err(ParseError {
+                message: "expected function body".to_string(),
+                offset: self.offset(),
+                incomplete: true,
+            });
+        }
+        self.parse_command()
     }
 
     /// `if cond; then body; [elif cond; then body;]* [else body;] fi`.
@@ -500,6 +597,16 @@ impl Parser {
 /// valid shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — return `(NAME, value)`
 /// with the (still-unexpanded) value. The value may be empty or contain further
 /// `=` characters. Returns `None` otherwise.
+/// True if `s` is a valid shell identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn split_assignment(word: &str) -> Option<(String, String)> {
     let eq = word.find('=')?;
     let name = &word[..eq];
@@ -522,7 +629,7 @@ mod tests {
     fn simple(c: &Command) -> &SimpleCommand {
         match c {
             Command::Simple(sc) => sc,
-            Command::Compound(_) => panic!("expected a simple command"),
+            _ => panic!("expected a simple command"),
         }
     }
 
@@ -650,6 +757,43 @@ mod tests {
     #[test]
     fn stray_esac_is_hard_error() {
         assert!(!parse("esac").unwrap_err().incomplete);
+    }
+
+    #[test]
+    fn parse_function_forms() {
+        for src in [
+            "f() { echo hi; }",
+            "function f { echo hi; }",
+            "f () { echo hi; }",
+        ] {
+            match only_command(&parse(src).unwrap()) {
+                Command::FunctionDef { name, .. } => assert_eq!(name, "f", "src: {}", src),
+                other => panic!("expected function def for {:?}, got {:?}", src, other),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_brace_group() {
+        assert!(matches!(
+            only_command(&parse("{ echo a; echo b; }").unwrap()),
+            Command::Compound(CompoundCommand::BraceGroup(_))
+        ));
+    }
+
+    #[test]
+    fn unterminated_brace_and_function_are_incomplete() {
+        assert!(parse("{ echo a").unwrap_err().incomplete);
+        assert!(parse("f() {").unwrap_err().incomplete);
+    }
+
+    #[test]
+    fn echo_with_paren_word_is_not_a_function() {
+        // `echo` isn't an identifier()-shaped token, and `x=5` etc. stay simple.
+        assert!(matches!(
+            only_command(&parse("echo hi").unwrap()),
+            Command::Simple(_)
+        ));
     }
 
     fn cmd(name: &str, args: &[&str]) -> Command {

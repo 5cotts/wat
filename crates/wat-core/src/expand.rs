@@ -269,15 +269,19 @@ fn expand_word_ctx_inner(
                             push_split(&mut fields, &mut current, &output);
                         }
                     }
-                    // Arithmetic: evaluate and splice the decimal result (never
-                    // split, like a quoted value). On error, emit a diagnostic
-                    // and substitute nothing.
-                    SubstKind::Arith => match crate::arith::eval_arith(&inner, &ctx.env) {
-                        Ok(v) => push_literal(&mut current, &v.to_string()),
-                        Err(e) => {
-                            err.write(format!("wat: arithmetic: {}\n", e).as_bytes());
+                    // Arithmetic: parameter-expand the inner first (so `$1`,
+                    // `$x`, `$#` resolve to their values, like bash), then
+                    // evaluate and splice the decimal result (never split). On
+                    // error, emit a diagnostic and substitute nothing.
+                    SubstKind::Arith => {
+                        let pre = expand_word(&inner, &ctx.env);
+                        match crate::arith::eval_arith(&pre, &ctx.env) {
+                            Ok(v) => push_literal(&mut current, &v.to_string()),
+                            Err(e) => {
+                                err.write(format!("wat: arithmetic: {}\n", e).as_bytes());
+                            }
                         }
-                    },
+                    }
                 }
                 i = next;
                 continue;

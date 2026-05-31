@@ -2,6 +2,8 @@ use crate::env::Env;
 use crate::history::History;
 use crate::process::{NoopProcessHost, ProcessHost};
 use crate::vfs::{MemoryVfs, Vfs};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -57,6 +59,14 @@ pub struct Context {
     /// stops the current list when this is `Some`, so `exit` terminates a
     /// script mid-way; `Shell::feed*` surfaces it as `exit_requested`.
     pub exit_status: Option<i32>,
+    /// Defined shell functions (name → body AST). `Rc` so a call can clone the
+    /// handle cheaply and release the table borrow before evaluating the body.
+    pub functions: HashMap<String, Rc<crate::ast::Command>>,
+    /// How many function calls are currently executing; `return` is only
+    /// meaningful when > 0.
+    pub fn_depth: u32,
+    /// Pending `return` status, consumed by the function-call evaluator.
+    pub returning: Option<i32>,
 }
 
 impl Context {
@@ -84,6 +94,9 @@ impl Context {
             loop_depth: 0,
             loop_ctl: None,
             exit_status: None,
+            functions: HashMap::new(),
+            fn_depth: 0,
+            returning: None,
         }
     }
 
@@ -107,6 +120,9 @@ impl Context {
             loop_depth: 0,
             loop_ctl: None,
             exit_status: None,
+            functions: HashMap::new(),
+            fn_depth: 0,
+            returning: None,
         }
     }
 }
