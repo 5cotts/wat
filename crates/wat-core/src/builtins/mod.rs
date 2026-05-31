@@ -7,6 +7,7 @@ pub mod easter;
 #[cfg(feature = "native-pty")]
 pub mod jobs_builtins;
 pub mod resolve;
+pub mod test_cmd;
 
 /// Run a builtin. Returns `Some(exit_code)` if known, `None` if not a builtin.
 /// `history` is `None` when called from a context that doesn't track it (e.g., pipeline stage).
@@ -30,6 +31,8 @@ pub fn run_builtin<'a>(
         "false" => Some(1),
         "break" => Some(loop_ctl_builtin(LoopCtl::Break, "break", ctx, io)),
         "continue" => Some(loop_ctl_builtin(LoopCtl::Continue, "continue", ctx, io)),
+        "test" => Some(test_cmd::test_builtin("test", args, ctx, io)),
+        "[" => Some(test_cmd::test_builtin("[", args, ctx, io)),
         // File builtins
         "ls" => Some(ls(args, ctx, io)),
         "cat" => Some(cat(args, ctx, io)),
@@ -90,6 +93,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "false"
             | "break"
             | "continue"
+            | "test"
+            | "["
             | "ls"
             | "cat"
             | "mkdir"
