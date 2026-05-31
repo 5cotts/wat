@@ -59,9 +59,19 @@ fn expand_dollar(chars: &[char], i: usize, env: &Env) -> (String, usize) {
         if i < chars.len() {
             i += 1; // consume '}'
         }
-        (expand_var(&name, env).to_string(), i)
+        (expand_braced(&name, env), i)
     } else if chars[i] == '?' {
         (env.last_exit_code.to_string(), i + 1)
+    } else if chars[i] == '#' {
+        (env.params.len().to_string(), i + 1)
+    } else if chars[i] == '@' || chars[i] == '*' {
+        // Scalar fallback (a single space-joined string). The field-aware
+        // form of `$@` is handled in expand_word_ctx.
+        (env.params.join(" "), i + 1)
+    } else if chars[i].is_ascii_digit() {
+        // `$0`..`$9` (single digit; multi-digit needs `${N}`).
+        let n = chars[i].to_digit(10).unwrap() as usize;
+        (positional(n, env), i + 1)
     } else if chars[i].is_alphabetic() || chars[i] == '_' {
         let start = i;
         while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -73,6 +83,31 @@ fn expand_dollar(chars: &[char], i: usize, env: &Env) -> (String, usize) {
         // Bare `$` or `$` before a non-name char: leave the `$` literal and let
         // the caller process the following character normally.
         ("$".to_string(), i)
+    }
+}
+
+/// `$0`/`$N` lookup: `$0` is the shell/script name; `$N` (N>=1) is `params[N-1]`.
+fn positional(n: usize, env: &Env) -> String {
+    if n == 0 {
+        env.arg0.clone()
+    } else {
+        env.params.get(n - 1).cloned().unwrap_or_default()
+    }
+}
+
+/// Expand the contents of `${...}` (scalar form). Handles positional params
+/// (`${N}`, `${#}`, `${@}`, `${*}`) and plain variables. Parameter-expansion
+/// operators (`:-`, `#`, `%`, length `${#VAR}`, ...) arrive in Phase D.
+fn expand_braced(name: &str, env: &Env) -> String {
+    if name == "#" {
+        env.params.len().to_string()
+    } else if name == "@" || name == "*" {
+        env.params.join(" ")
+    } else if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+        let n: usize = name.parse().unwrap_or(0);
+        positional(n, env)
+    } else {
+        expand_var(name, env).to_string()
     }
 }
 
@@ -249,6 +284,14 @@ fn expand_word_ctx_inner(
             }
             // Not a balanced span (shouldn't happen post-lexer): fall through.
         }
+        // `$@` expands to one field per positional parameter (the common
+        // `"$@"` behavior). `$*` stays a single space-joined field, handled by
+        // expand_dollar below.
+        if c == '$' && i + 1 < chars.len() && chars[i + 1] == '@' {
+            push_fields(&mut fields, &mut current, &ctx.env.params);
+            i += 2;
+            continue;
+        }
         if c == '$' {
             let (text, next) = expand_dollar(&chars, i, &ctx.env);
             push_literal(&mut current, &text);
@@ -263,6 +306,22 @@ fn expand_word_ctx_inner(
         fields.push(c);
     }
     fields
+}
+
+/// Emit one field per item (e.g. `$@`): the first item joins the field in
+/// progress, each subsequent item starts a new field. With no items, nothing
+/// is emitted (so a lone `$@` with no params contributes no argument).
+fn push_fields(fields: &mut Vec<String>, current: &mut Option<String>, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    push_literal(current, &items[0]);
+    for it in &items[1..] {
+        if let Some(c) = current.take() {
+            fields.push(c);
+        }
+        push_literal(current, it);
+    }
 }
 
 /// Append non-splittable text to the field in progress, starting one if needed.

@@ -4,6 +4,10 @@ pub struct Env {
     pub vars: HashMap<String, String>,
     pub cwd: String,
     pub last_exit_code: i32,
+    /// `$0` — the shell or script name.
+    pub arg0: String,
+    /// Positional parameters: `params[i]` is `$(i+1)`.
+    pub params: Vec<String>,
 }
 
 impl Env {
@@ -20,6 +24,8 @@ impl Env {
             vars,
             cwd: home,
             last_exit_code: 0,
+            arg0: "wat".to_string(),
+            params: Vec::new(),
         }
     }
 
