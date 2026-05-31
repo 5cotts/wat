@@ -36,6 +36,11 @@ pub fn run_builtin<'a>(
         "set" => Some(set_builtin(args, ctx, io)),
         "shift" => Some(shift_builtin(args, ctx, io)),
         "return" => Some(return_builtin(args, ctx, io)),
+        ":" => Some(0),
+        "printf" => Some(printf_builtin(args, io)),
+        "read" => Some(read_builtin(args, ctx, io)),
+        "eval" => Some(eval_builtin(args, ctx, io)),
+        "source" | "." => Some(source_builtin(args, ctx, io)),
         // File builtins
         "ls" => Some(ls(args, ctx, io)),
         "cat" => Some(cat(args, ctx, io)),
@@ -101,6 +106,12 @@ pub fn is_builtin(name: &str) -> bool {
             | "set"
             | "shift"
             | "return"
+            | ":"
+            | "printf"
+            | "read"
+            | "eval"
+            | "source"
+            | "."
             | "ls"
             | "cat"
             | "mkdir"
@@ -130,25 +141,49 @@ pub fn is_builtin(name: &str) -> bool {
     )
 }
 
-/// `set`: with no args, list variables; `set -- a b c` (or `set a b c`)
-/// replaces the positional parameters. Option flags (`-e`/`-u`/`-x`) arrive in
-/// Phase E and are treated as a no-op here unless followed by `--`.
+/// `set`: with no args, list variables. Leading `-e`/`-u`/`-x` (and their `+`
+/// disabling forms, combinable like `-eux`) toggle shell options. A `--`, or
+/// the first non-option word, ends option parsing; the remaining words replace
+/// the positional parameters. `set -e` (options only, no operands) leaves the
+/// positionals untouched, while `set --` clears them.
 fn set_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     if args.is_empty() {
         return env_builtin(ctx, io);
     }
-    let operands: Vec<String> = if args[0] == "--" {
-        args[1..].to_vec()
-    } else if !args[0].starts_with('-') && !args[0].starts_with('+') {
-        args.to_vec()
-    } else {
-        // Flags present (Phase E). Take operands after a `--`, else change nothing.
-        match args.iter().position(|a| a == "--") {
-            Some(p) => args[p + 1..].to_vec(),
-            None => return 0,
+    let mut i = 0;
+    let mut explicit_end = false;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--" {
+            explicit_end = true;
+            i += 1;
+            break;
         }
-    };
-    ctx.env.params = operands;
+        let enable = match a.as_bytes().first() {
+            Some(b'-') => true,
+            Some(b'+') => false,
+            _ => break, // first operand
+        };
+        if a.len() == 1 {
+            break; // a lone "-"/"+" is not an option
+        }
+        for c in a[1..].chars() {
+            match c {
+                'e' => ctx.opt_errexit = enable,
+                'u' => ctx.opt_nounset = enable,
+                'x' => ctx.opt_xtrace = enable,
+                other => {
+                    io.write_err(&format!("wat: set: -{}: invalid option\n", other));
+                    return 2;
+                }
+            }
+        }
+        i += 1;
+    }
+    // Replace positionals only when operands were given or `--` appeared.
+    if explicit_end || i < args.len() {
+        ctx.env.params = args[i..].to_vec();
+    }
     0
 }
 
@@ -180,6 +215,169 @@ fn shift_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
     }
     ctx.env.params.drain(0..n);
     0
+}
+
+/// `printf FORMAT [ARG...]`: a focused subset of POSIX printf. Supports the
+/// `%s`, `%d`/`%i`, `%x`, and `%%` conversions and the `\n \t \r \\ \0 \a`
+/// escapes. When more arguments are given than the format consumes, the format
+/// is reused until the arguments are exhausted (POSIX cycling).
+fn printf_builtin(args: &[String], io: &mut ShellIo) -> i32 {
+    let Some(format) = args.first() else {
+        io.write_err("printf: usage: printf format [arguments]\n");
+        return 2;
+    };
+    let rest = &args[1..];
+    let mut out = String::new();
+    let mut ai = 0;
+    loop {
+        let (next, had_conversion) = printf_pass(format, rest, ai, &mut out);
+        ai = next;
+        if !had_conversion || ai >= rest.len() {
+            break;
+        }
+    }
+    io.write_out(&out);
+    0
+}
+
+/// One pass over `fmt`, consuming arguments starting at `start`. Returns the
+/// next argument index and whether the format contained an argument-consuming
+/// conversion (used to decide whether to cycle).
+fn printf_pass(fmt: &str, args: &[String], start: usize, out: &mut String) -> (usize, bool) {
+    let chars: Vec<char> = fmt.chars().collect();
+    let mut i = 0;
+    let mut ai = start;
+    let mut had_conversion = false;
+    let int_arg = |args: &[String], idx: usize| -> i64 {
+        args.get(idx)
+            .map(|s| s.trim().parse::<i64>().unwrap_or(0))
+            .unwrap_or(0)
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            i += 1;
+            match chars[i] {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                '\\' => out.push('\\'),
+                '0' => out.push('\0'),
+                'a' => out.push('\u{7}'),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+            i += 1;
+        } else if c == '%' && i + 1 < chars.len() {
+            i += 1;
+            match chars[i] {
+                '%' => out.push('%'),
+                's' => {
+                    had_conversion = true;
+                    if let Some(a) = args.get(ai) {
+                        out.push_str(a);
+                    }
+                    ai += 1;
+                }
+                'd' | 'i' => {
+                    had_conversion = true;
+                    out.push_str(&int_arg(args, ai).to_string());
+                    ai += 1;
+                }
+                'x' => {
+                    had_conversion = true;
+                    out.push_str(&format!("{:x}", int_arg(args, ai)));
+                    ai += 1;
+                }
+                other => {
+                    out.push('%');
+                    out.push(other);
+                }
+            }
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    (ai, had_conversion)
+}
+
+/// `read [-r] [NAME...]`: read one line from stdin and split it on whitespace
+/// into the named variables (the last name receives any remainder). With no
+/// names, the line is stored in `REPLY`. Returns 1 at end of input. `-r` is
+/// accepted (backslashes are already taken literally). Reads only the first
+/// line of the provided stdin (a pipeline or redirect); the rest is discarded.
+fn read_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    let mut names: Vec<&String> = Vec::new();
+    for a in args {
+        if a != "-r" {
+            names.push(a);
+        }
+    }
+    let input = io.stdin_str();
+    if input.is_empty() {
+        return 1; // EOF: nothing read.
+    }
+    let line = input.lines().next().unwrap_or("");
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+
+    if names.is_empty() {
+        ctx.env.set("REPLY", line.trim());
+        return 0;
+    }
+    let n = names.len();
+    for (idx, name) in names.iter().enumerate() {
+        let value = if idx + 1 < n {
+            tokens.get(idx).copied().unwrap_or("").to_string()
+        } else if idx < tokens.len() {
+            tokens[idx..].join(" ")
+        } else {
+            String::new()
+        };
+        ctx.env.set((*name).clone(), value);
+    }
+    0
+}
+
+/// `eval ARG...`: join the arguments with spaces, then parse and run the result
+/// in the current shell (so any assignments, functions, or `cd` persist).
+fn eval_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    let src = args.join(" ");
+    run_in_current_shell(&src, ctx, io)
+}
+
+/// `.`/`source FILE`: read FILE from the VFS and run its contents in the
+/// current shell. Positional parameters are left unchanged.
+fn source_builtin(args: &[String], ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    let Some(file) = args.first() else {
+        io.write_err("wat: source: filename argument required\n");
+        return 2;
+    };
+    let path = resolve_path(file, &ctx.env.cwd);
+    let bytes = match ctx.vfs.read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            io.write_err(&format!("wat: source: {}: {}\n", file, e));
+            return 1;
+        }
+    };
+    let src = String::from_utf8_lossy(&bytes).into_owned();
+    run_in_current_shell(&src, ctx, io)
+}
+
+/// Parse `src` and evaluate it in the current shell, routing output through the
+/// builtin's I/O. Shared by `eval` and `source`.
+fn run_in_current_shell(src: &str, ctx: &mut Context, io: &mut ShellIo) -> i32 {
+    match crate::parser::parse(src) {
+        Ok(list) => crate::eval::eval_streaming(&list, ctx, io.stdout, io.stderr),
+        Err(e) => {
+            io.write_err(&format!("wat: {}\n", e));
+            2
+        }
+    }
 }
 
 /// `break` / `continue`: request loop control. Only meaningful inside a loop;
